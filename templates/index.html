@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>ADSB Display</title>
+
+        <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='leaflet/leaflet.css') }}"
+        >
+
+        <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='dashboard.css') }}"
+        >
+    </head>
+    <body>
+        <div class="container">
+            <aside class="left-panel">
+                <nav class="mode-controls" aria-label="Aircraft feed controls">
+                    <button
+                        class="mode-button mode-toggle"
+                        id="normal-toggle"
+                        type="button"
+                        data-mode="normal"
+                        aria-pressed="false"
+                    >Normal</button>
+                    <button
+                        class="mode-button mode-toggle"
+                        id="military-toggle"
+                        type="button"
+                        data-mode="military"
+                        aria-pressed="false"
+                    >Military</button>
+                    <button
+                        class="mode-button coords-button"
+                        id="coords-button"
+                        type="button"
+                        title="Change center coordinates"
+                    >Coords</button>
+                </nav>
+
+                <div class="range-controls" aria-label="Aircraft search range">
+                    <span class="range-label">Range</span>
+                    <div class="range-options">
+                        <button
+                            class="range-button"
+                            type="button"
+                            data-range="15"
+                            aria-pressed="false"
+                        >15</button>
+                        <button
+                            class="range-button"
+                            type="button"
+                            data-range="25"
+                            aria-pressed="false"
+                        >25</button>
+                        <button
+                            class="range-button"
+                            type="button"
+                            data-range="50"
+                            aria-pressed="false"
+                        >50</button>
+                    </div>
+                    <span class="range-unit">NM</span>
+                </div>
+
+                <section class="panel-section closest-panel">
+                    <header class="panel-heading">
+                        <span id="primary-heading">Nearest contact</span>
+                        <span class="live-status">Live</span>
+                    </header>
+
+                    <h1 class="closest-callsign">
+                        <span id="closest-callsign">--</span>
+                    </h1>
+
+                    <p class="aircraft-type">
+                        <span id="closest-t">--</span>
+                    </p>
+
+                    <figure
+                        class="aircraft-visual"
+                        aria-label="Aircraft type reference photograph"
+                    >
+                        <img
+                            class="aircraft-image"
+                            id="primary-aircraft-image"
+                            alt=""
+                            hidden
+                        >
+                    </figure>
+
+                    <div class="metric-grid">
+                        <div class="metric">
+                            <span class="metric-label">Distance</span>
+                            <span class="metric-value" id="closest-range">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Altitude</span>
+                            <span class="metric-value" id="closest-alt_baro">--</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Speed</span>
+                            <span class="metric-value" id="closest-gs">--</span>
+                        </div>
+                    </div>
+
+                    <div class="route-strip" aria-label="Flight route">
+                        <div class="route-airport">
+                            <span class="route-code" id="route-departure">--</span>
+                            <span
+                                class="route-airport-name"
+                                id="route-departure-name"
+                            ></span>
+                        </div>
+                        <span class="route-logo-slot">
+                            <img
+                                class="route-logo"
+                                id="route-airline-logo"
+                                alt=""
+                                hidden
+                            >
+                            <span
+                                class="route-private"
+                                id="route-private"
+                                hidden
+                            >PRIVATE</span>
+                            <span
+                                class="route-airline-text"
+                                id="route-airline-text"
+                                hidden
+                            ></span>
+                        </span>
+                        <div class="route-airport">
+                            <span class="route-code" id="route-destination">--</span>
+                            <span
+                                class="route-airport-name"
+                                id="route-destination-name"
+                            ></span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel-section traffic-panel">
+                    <header class="panel-heading traffic-heading">
+                        <span>Local traffic</span>
+                        <span class="aircraft-count" id="aircraft-count">--</span>
+                    </header>
+
+                    <div class="aircraft-list-header" aria-hidden="true">
+                        <span>Callsign</span>
+                        <span>Type</span>
+                        <span>Alt ft</span>
+                    </div>
+
+                    <div
+                        class="aircraft-list"
+                        id="aircraft-list"
+                        aria-live="polite"
+                    >
+                        <p class="list-message">Loading traffic</p>
+                    </div>
+                </section>
+            </aside>
+
+            <main class="right-panel">
+                <div id="map"></div>
+            </main>
+        </div>
+
+        <dialog
+            class="coordinate-dialog"
+            id="coordinate-dialog"
+            aria-labelledby="coordinate-dialog-title"
+        >
+            <form class="coordinate-form" id="coordinate-form">
+                <header class="coordinate-dialog-header">
+                    <div>
+                        <p class="coordinate-dialog-label">Receiver center</p>
+                        <h2 id="coordinate-dialog-title">Coordinates</h2>
+                    </div>
+                    <button
+                        class="dialog-close"
+                        id="coordinate-close"
+                        type="button"
+                        aria-label="Close coordinate controls"
+                    >&times;</button>
+                </header>
+
+                <div class="coordinate-fields">
+                    <div class="coordinate-field">
+                        <label for="coordinate-lat">Latitude</label>
+                        <input
+                            class="coordinate-input"
+                            id="coordinate-lat"
+                            name="lat"
+                            type="number"
+                            min="-90"
+                            max="90"
+                            step="any"
+                            required
+                        >
+                    </div>
+                    <div class="coordinate-field">
+                        <label for="coordinate-lon">Longitude</label>
+                        <input
+                            class="coordinate-input"
+                            id="coordinate-lon"
+                            name="lon"
+                            type="number"
+                            min="-180"
+                            max="180"
+                            step="any"
+                            required
+                        >
+                    </div>
+                </div>
+
+                <div class="coordinate-actions">
+                    <button
+                        class="dialog-button"
+                        id="device-location-button"
+                        type="button"
+                    >Use device location</button>
+                    <button
+                        class="dialog-button primary"
+                        id="save-coordinates-button"
+                        type="submit"
+                    >Apply coordinates</button>
+                </div>
+
+                <p
+                    class="coordinate-status"
+                    id="coordinate-status"
+                    role="status"
+                    aria-live="polite"
+                ></p>
+            </form>
+        </dialog>
+
+        <script src="{{ url_for('static', filename='leaflet/leaflet.js') }}"></script>
+
+        <script>
+            window.ADSB_DISPLAY_CONFIG = {
+                mapCenter: {{ map_center | tojson }},
+                searchRangeNm: {{ search_range_nm | tojson }},
+                aircraftRefreshMs: {{ aircraft_refresh_ms | tojson }},
+                allAircraftUrl: {{ url_for('get_all_aircraft') | tojson }},
+                airportsUrl: {{ url_for('get_airports') | tojson }},
+                aircraftDetailUrlTemplate: {{ url_for('get_aircraft', aircraft_hex='__HEX__') | tojson }},
+                modeSettingsUrl: {{ url_for('mode_settings') | tojson }},
+                coordinateSettingsUrl: {{ url_for('coordinate_settings') | tojson }}
+            };
+        </script>
+        <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+    </body>
+</html>

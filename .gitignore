@@ -1,0 +1,52 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime databases and SQLite sidecar files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Downloaded map-tile cache
+static/tiles/
+
+# Logs, coverage, and test output
+*.log
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Python build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local Codex/agent and cloud configuration
+.agents/
+.codex/
+.aws/

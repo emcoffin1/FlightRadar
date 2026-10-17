@@ -1,0 +1,194 @@
+"""Static aircraft icon, photograph, and airline-logo catalogs."""
+
+from config import AIRCRAFT_IMAGE_DIR, AIRCRAFT_PHOTO_DIR
+
+
+AIRLINE_LOGOS = {
+    "AAL": "airlines/AAL.svg",
+    "ASA": "airlines/ASA.svg",
+    "DAL": "airlines/DAL.svg",
+    "FFT": "airlines/FFT.svg",
+    "JBU": "airlines/JBU.svg",
+    "NKS": "airlines/NKS.svg",
+    "SWA": "airlines/SWA.svg",
+    "UAL": "airlines/UAL.svg",
+}
+
+AIRCRAFT_IMAGE_ALIASES = {
+    # Closely related airliner variants without their own silhouette.
+    "A319": "A318",
+    "AT43": "AT45",
+    "AT44": "AT45",
+    "AT46": "AT45",
+    "AT72": "AT75",
+    "AT73": "AT75",
+    "AT76": "AT75",
+    "B731": "B733",
+    "B732": "B733",
+    "B736": "B737",
+    "E75L": "E170",
+    "E75S": "E170",
+    "E135": "E35L",
+    "E140": "E35L",
+    "E145": "E35L",
+    "E190": "E195",
+    "E290": "E195",
+    "E295": "E195",
+    "S22T": "SR22",
+    "SR20": "SR22",
+    "PRM1": "C25B",
+    "B37M": "B38M",
+    "B3XM": "B38M",
+    # Common general-aviation and business-aircraft families.
+    "C150": "C172",
+    "C152": "C172",
+    "C177": "C172",
+    "C180": "C172",
+    "C182": "C172",
+    "C185": "C172",
+    "C206": "C172",
+    "C210": "C172",
+    "C25A": "C25B",
+    "C25C": "C25B",
+    "CL30": "CL2T",
+    "CL35": "CL2T",
+    "CL60": "CL2T",
+    "GLEX": "GL5T",
+    "GLF4": "GLF6",
+    "GLF5": "GLF6",
+    "LJ31": "LJ35",
+    "LJ40": "LJ35",
+    "LJ45": "LJ35",
+    "LJ60": "LJ35",
+    "P28R": "P28A",
+    "P28T": "P28A",
+    # Rotorcraft and aircraft whose source library has flight-state variants.
+    "B1": "B1 slow",
+    "R22": "R44",
+    "V22": "V22 slow",
+    "TOR": "TOR slow",
+}
+
+AIRCRAFT_IMAGE_FILES = {
+    path.stem.upper(): path.name
+    for path in AIRCRAFT_IMAGE_DIR.glob("*.svg")
+}
+
+AIRCRAFT_PHOTO_FAMILIES = {
+    "a220": {"BCS1", "BCS3"},
+    "a320": {"A318", "A319", "A320", "A321", "A19N", "A20N", "A21N"},
+    "a330": {"A306", "A310", "A332", "A333", "A337", "A338", "A339", "KC2"},
+    "a340": {"A342", "A343", "A345", "A346"},
+    "a350": {"A359", "A35K"},
+    "a380": {"A388"},
+    "beluga": {"A3ST", "SGUP"},
+    "atr42": {"AT43", "AT44", "AT45", "AT46"},
+    "atr72": {"AT72", "AT73", "AT75", "AT76", "ATP"},
+    "b707": {"B703", "E3CF", "E3TF", "E8", "IL62", "K35E", "R135", "T204"},
+    "b717": {"B712"},
+    "b727": {"B722"},
+    "b737": {
+        "B731", "B732", "B733", "B734", "B735", "B736", "B737",
+        "B738", "B739", "E737", "P8",
+    },
+    "b737max": {"B37M", "B38M", "B39M", "B3XM"},
+    "b747": {"B742", "B744", "B748", "B74S", "BLCF"},
+    "b757": {"B752", "B753"},
+    "b767": {"B762", "B763", "B764", "KC46"},
+    "b777": {"B772", "B773", "B779", "B77L", "B77W"},
+    "b787": {"B788", "B789", "B78X"},
+    "crj": {"CRJ1", "CRJ2", "CRJ7", "CRJ9", "CRJX"},
+    "dash8": {"DH8A", "DH8B", "DH8C", "DH8D", "Q4"},
+    "ejet": {
+        "E170", "E175", "E190", "E195", "E290", "E295", "E75L",
+        "E75S", "RJ85", "SB39", "SU95",
+    },
+    "erj": {"E135", "E140", "E145", "E35L"},
+    "dornier328": {"D328", "J328"},
+    "saab340": {"F50", "SF34"},
+    "md11": {"DC10", "MD11"},
+    "md80": {"DC87", "MD80", "MD81", "MD82", "MD83", "MD87", "MD88"},
+    "c150": {"C150", "C152"},
+    "c172": {"C172"},
+    "c172rg": {"C72R"},
+    "c182": {"C177", "C180", "C182", "C185"},
+    "c206": {"C206", "C210"},
+    "bonanza": {"BE36"},
+    "da42": {"DA42"},
+    "extra300": {"E300"},
+    "pa46": {"PA46"},
+    "pc6": {"PC6T"},
+    "sf25": {"SF25"},
+    "c208": {"BN2P", "C208", "D228", "DO27", "DO28", "F406", "SC7", "ST75"},
+    "kingair": {"B190", "B200", "B300", "B350", "BE9L"},
+    "avanti": {"P180"},
+    "pa28": {"P28A", "P28R", "P28T"},
+    "pa18": {"PA18"},
+    "pa24": {"PA24"},
+    "pa30": {"PA30"},
+    "p32r": {"P32R"},
+    "pc12": {"PC12"},
+    "rv7": {"RV7"},
+    "sr22": {"SR20", "SR22", "S22T"},
+    "tecnam_p2002": {"SIRA"},
+    "challenger": {"CL2T", "CL30", "CL35"},
+    "challenger600": {"CL60"},
+    "citation": {
+        "C25A", "C25B", "C25C", "C500", "C510", "C525", "C550",
+        "C680", "C700",
+    },
+    "citation_v": {"C560"},
+    "citation_x": {"C750"},
+    "citation_excel": {"C56X"},
+    "phenom300": {"E55P"},
+    "legacy500": {"E545", "E550"},
+    "falcon20": {"FA20"},
+    "falcon2000": {"F2TH"},
+    "falcon": {"FA7X"},
+    "gulfstream_g200": {"GALX"},
+    "gulfstream_g600": {"GA5C", "GA6C"},
+    "gulfstream": {"GLEX", "GL5T", "GLF4", "GLF5", "GLF6"},
+    "hawker800": {"H25B"},
+    "kodiak": {"K900"},
+    "learjet": {"LJ31", "LJ35", "LJ40", "LJ45", "LJ60"},
+    "premier": {"PRM1"},
+    "r44": {"R22", "R44"},
+    "r66": {"R66"},
+    "bell407": {"B407"},
+    "as350": {"AS50"},
+    "visionjet": {"SF50"},
+    "citabria": {"CH7A", "CH7B"},
+    "h135": {
+        "AS32", "AS65", "EC20", "EC25", "EC30", "EC35",
+        "EC45", "GAZL", "GYRO", "S61",
+    },
+    "blackhawk": {
+        "H47", "H60", "H64", "LYNX", "MI24", "NH90", "TOR",
+        "TOR FAST", "TOR SLOW", "UH1",
+    },
+    "a10": {"A10"},
+    "c130": {
+        "A400", "AN12", "AN26", "C2", "C30J", "C130", "C160", "C295",
+        "CN35", "DC3", "E390", "P1", "P3", "U2",
+    },
+    "c17": {"C17", "C5M", "IL76"},
+    "an124": {"A124", "A225"},
+    "f16": {
+        "A4", "AJET", "B1", "B1 FAST", "B1 SLOW", "B29", "B52", "F5",
+        "F15", "F16", "F18H", "F18S", "F22", "EUFI", "HAWK", "HUNT",
+        "L159", "M326", "MIRA", "MRF1", "PC9", "RFAL", "T38", "TIGR",
+    },
+    "f35": {"F35", "VF35"},
+    "v22": {"V22", "V22 FAST", "V22 SLOW"},
+}
+
+AIRCRAFT_PHOTO_BY_TYPE = {
+    type_code: family
+    for family, type_codes in AIRCRAFT_PHOTO_FAMILIES.items()
+    for type_code in type_codes
+}
+
+AIRCRAFT_PHOTO_FILES = {
+    path.stem.lower(): path.name
+    for path in AIRCRAFT_PHOTO_DIR.glob("*.webp")
+}
