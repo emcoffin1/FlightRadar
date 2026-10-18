@@ -175,11 +175,19 @@ async function loadModeSettings() {
     }
 }
 
+function setButtonsPending(buttons, isPending) {
+    for (const button of buttons) {
+        button.classList.toggle("is-pending", isPending);
+        button.disabled = isPending;
+    }
+}
+
 async function toggleMode(event) {
     const button = event.currentTarget;
+    const buttons = document.querySelectorAll("[data-mode]");
     const mode = button.dataset.mode;
     const enabled = button.getAttribute("aria-pressed") !== "true";
-    button.classList.add("is-pending");
+    setButtonsPending(buttons, true);
 
     try {
         const response = await fetch(modeSettingsUrl, {
@@ -199,7 +207,7 @@ async function toggleMode(event) {
         console.error(`Could not update ${mode} feed:`, error);
         await loadModeSettings();
     } finally {
-        button.classList.remove("is-pending");
+        setButtonsPending(buttons, false);
     }
 }
 
@@ -215,9 +223,7 @@ async function selectSearchRange(event) {
         return;
     }
 
-    for (const button of buttons) {
-        button.classList.add("is-pending");
-    }
+    setButtonsPending(buttons, true);
 
     try {
         const response = await fetch(modeSettingsUrl, {
@@ -242,9 +248,7 @@ async function selectSearchRange(event) {
         console.error("Could not update aircraft search range:", error);
         await loadModeSettings();
     } finally {
-        for (const button of buttons) {
-            button.classList.remove("is-pending");
-        }
+        setButtonsPending(buttons, false);
     }
 }
 

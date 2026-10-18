@@ -41,6 +41,11 @@
     padding: 0;
 }
 
+button {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
 html,
 body {
     width: 100%;
@@ -92,15 +97,19 @@ body {
 .mode-button {
     position: relative;
     display: inline-flex;
+    min-width: 0;
     align-items: center;
     justify-content: center;
-    gap: 7px;
+    gap: clamp(4px, 0.8vw, 7px);
+    padding: 0 clamp(4px, 1.2vw, 12px);
+    overflow: hidden;
     border: 0;
     color: var(--muted);
     background: transparent;
-    font: 600 0.76rem "Rajdhani", "Arial Narrow", sans-serif;
-    letter-spacing: 0.11em;
+    font: 600 clamp(0.68rem, 1.4vw, 0.76rem) "Rajdhani", "Arial Narrow", sans-serif;
+    letter-spacing: clamp(0.06em, 0.2vw, 0.11em);
     text-transform: uppercase;
+    white-space: nowrap;
     cursor: pointer;
     transition: color 120ms ease, background 120ms ease;
 }
@@ -111,6 +120,7 @@ body {
 
 .mode-button::before {
     content: "";
+    flex: 0 0 6px;
     width: 6px;
     height: 6px;
     border: 1px solid #6e675c;
@@ -167,14 +177,15 @@ body {
     flex: 0 0 38px;
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 0 14px 0 18px;
+    gap: clamp(6px, 1.2vw, 10px);
+    padding: 0 clamp(10px, 1.4vw, 14px) 0 clamp(12px, 1.8vw, 18px);
     border-bottom: 1px solid var(--line);
     background: #100f0d;
 }
 
 .range-label,
 .range-unit {
+    flex: 0 0 auto;
     color: var(--muted);
     font-size: 0.66rem;
     font-weight: 600;
@@ -185,6 +196,7 @@ body {
 .range-options {
     display: grid;
     flex: 1;
+    min-width: 0;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     height: 25px;
     border: 1px solid var(--line);
@@ -193,6 +205,7 @@ body {
 }
 
 .range-button {
+    min-width: 0;
     border: 0;
     color: var(--muted);
     background: transparent;
@@ -687,6 +700,14 @@ body {
     white-space: nowrap;
 }
 
+.aircraft-row .row-type,
+.aircraft-row .row-altitude {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .aircraft-row .row-type {
     color: var(--accent);
 }
@@ -1019,6 +1040,16 @@ body {
     .left-panel {
         flex-basis: clamp(285px, 38vw, 325px);
         width: clamp(285px, 38vw, 325px);
+    }
+
+    .mode-button {
+        padding-right: 5px;
+        padding-left: 5px;
+    }
+
+    .range-controls {
+        padding-right: 9px;
+        padding-left: 10px;
     }
 
     .closest-panel {
