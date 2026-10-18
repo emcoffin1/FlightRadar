@@ -951,8 +951,9 @@ if __name__ == "__main__":
     # Werkzeug's debug reloader runs this module once in a supervisor and once
     # in the server process. Start the collector only in the server process so
     # there is never a duplicate set of ADS-B API requests.
-    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        start_aircraft_collector()
+    # if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    #     start_aircraft_collector()
+    start_aircraft_collector()
 
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
     # app.run(debug=True)
