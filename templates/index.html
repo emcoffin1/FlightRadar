@@ -167,6 +167,25 @@
 
             <main class="right-panel">
                 <div id="map"></div>
+                <div
+                    class="http-error-indicator"
+                    id="http-error-indicator"
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                    hidden
+                >
+                    <svg
+                        class="http-error-icon"
+                        viewBox="0 0 24 24"
+                        aria-hidden="true"
+                        focusable="false"
+                    >
+                        <path d="M12 2.8 22 20.5H2L12 2.8Z"></path>
+                        <path d="M12 8v6.2M12 17.5v.1"></path>
+                    </svg>
+                    <span class="visually-hidden" id="http-error-message"></span>
+                </div>
             </main>
         </div>
 

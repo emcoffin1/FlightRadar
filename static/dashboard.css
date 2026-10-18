@@ -730,6 +730,59 @@ body {
     background: #100f0d;
 }
 
+.http-error-indicator {
+    position: absolute;
+    z-index: 1000;
+    top: 12px;
+    right: 12px;
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border: 1px solid rgba(224, 118, 88, 0.82);
+    border-radius: 4px;
+    color: #ef9a80;
+    background: rgba(28, 15, 12, 0.94);
+    box-shadow: 0 7px 22px rgba(0, 0, 0, 0.48);
+    pointer-events: none;
+}
+
+.http-error-indicator[hidden] {
+    display: none;
+}
+
+.http-error-icon {
+    width: 21px;
+    height: 21px;
+    overflow: visible;
+}
+
+.http-error-icon path:first-child {
+    fill: rgba(224, 118, 88, 0.13);
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+}
+
+.http-error-icon path:last-child {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 #map {
     width: 100%;
     height: 100%;

@@ -8,6 +8,78 @@ const aircraftDetailUrlTemplate = config.aircraftDetailUrlTemplate;
 const modeSettingsUrl = config.modeSettingsUrl;
 const coordinateSettingsUrl = config.coordinateSettingsUrl;
 
+const httpErrorIndicator = document.getElementById("http-error-indicator");
+const httpErrorMessage = document.getElementById("http-error-message");
+const failedRequestGroups = new Map();
+const browserFetch = window.fetch.bind(window);
+
+function requestGroup(input, init) {
+    const method = String(
+        (init && init.method) ||
+        (input instanceof Request && input.method) ||
+        "GET"
+    ).toUpperCase();
+    const rawUrl = input instanceof Request ? input.url : String(input);
+    const url = new URL(rawUrl, window.location.href);
+    let path = `${url.pathname}${url.search}`;
+
+    if (/^\/api\/aircraft\/[^/]+$/.test(url.pathname)) {
+        path = "/api/aircraft/:hex";
+    }
+
+    return `${method} ${path}`;
+}
+
+function updateHttpErrorIndicator() {
+    if (!httpErrorIndicator || !httpErrorMessage) {
+        return;
+    }
+
+    const failures = Array.from(failedRequestGroups.values());
+    const latestFailure = failures.at(-1);
+
+    if (!latestFailure) {
+        httpErrorIndicator.hidden = true;
+        httpErrorIndicator.removeAttribute("title");
+        httpErrorMessage.textContent = "";
+        return;
+    }
+
+    const additionalFailures = failures.length > 1
+        ? `; ${failures.length - 1} other endpoint failure${
+            failures.length === 2 ? "" : "s"
+        }`
+        : "";
+    const message = (
+        `HTTP ${latestFailure.status} ${latestFailure.statusText || "error"}` +
+        ` from ${latestFailure.group}${additionalFailures}`
+    );
+
+    httpErrorIndicator.hidden = false;
+    httpErrorIndicator.title = message;
+    httpErrorMessage.textContent = message;
+}
+
+window.fetch = async function monitoredFetch(input, init) {
+    const group = requestGroup(input, init);
+    const response = await browserFetch(input, init);
+
+    if (response.ok) {
+        failedRequestGroups.delete(group);
+    } else {
+        // Reinsert the group so the most recently failed request is reported.
+        failedRequestGroups.delete(group);
+        failedRequestGroups.set(group, {
+            group,
+            status: response.status,
+            statusText: response.statusText
+        });
+    }
+
+    updateHttpErrorIndicator();
+    return response;
+};
+
 const map = L.map("map", {
     minZoom: 7,
     maxZoom: 12,
