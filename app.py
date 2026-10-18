@@ -954,5 +954,5 @@ if __name__ == "__main__":
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         start_aircraft_collector()
 
-    # app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    # app.run(debug=True)
