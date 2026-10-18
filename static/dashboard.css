@@ -43,11 +43,14 @@
 
 html,
 body {
+    width: 100%;
+    height: 100%;
     min-height: 100%;
 }
 
 body {
     min-height: 100vh;
+    min-height: 100dvh;
     display: grid;
     place-items: center;
     overflow: hidden;
@@ -58,8 +61,10 @@ body {
 
 .container {
     display: flex;
-    width: min(1120px, 100vw);
+    width: min(1120px, 100%);
     height: min(600px, 100vh);
+    height: min(600px, 100dvh);
+    min-height: 0;
     overflow: hidden;
     border: 1px solid #3b362e;
     background: var(--surface);
@@ -67,8 +72,9 @@ body {
 }
 
 .left-panel {
-    width: 35%;
-    min-width: 350px;
+    flex: 0 1 clamp(300px, 35%, 392px);
+    width: clamp(300px, 35%, 392px);
+    min-width: 0;
     display: flex;
     flex-direction: column;
     background: var(--surface);
@@ -366,7 +372,8 @@ body {
 
 .closest-panel {
     position: relative;
-    flex: 0 0 310px;
+    flex: 0 1 310px;
+    min-height: 245px;
     padding: 18px 20px 16px 22px;
     border-bottom: 1px solid var(--line);
     overflow: hidden;
@@ -697,6 +704,7 @@ body {
     position: relative;
     flex: 1;
     min-width: 0;
+    min-height: 0;
     overflow: hidden;
     background: #100f0d;
 }
@@ -1007,13 +1015,146 @@ body {
     border-top-color: var(--line) !important;
 }
 
+@media (max-width: 860px) and (min-width: 721px) {
+    .left-panel {
+        flex-basis: clamp(285px, 38vw, 325px);
+        width: clamp(285px, 38vw, 325px);
+    }
+
+    .closest-panel {
+        padding-right: 14px;
+        padding-left: 16px;
+    }
+
+    .closest-callsign,
+    .aircraft-type {
+        max-width: calc(100% - 108px);
+    }
+
+    .aircraft-visual {
+        right: 14px;
+        width: 94px;
+        height: 72px;
+    }
+
+    .metric-grid {
+        gap: 6px;
+    }
+
+    .metric {
+        padding-right: 7px;
+        padding-left: 7px;
+    }
+
+    .route-strip {
+        grid-template-columns: minmax(0, 1fr) 68px minmax(0, 1fr);
+        gap: 5px;
+        padding-right: 8px;
+        padding-left: 8px;
+    }
+
+    .route-logo {
+        max-width: 64px;
+    }
+}
+
+@media (max-height: 540px) and (min-width: 721px) {
+    .mode-controls {
+        flex-basis: 42px;
+    }
+
+    .range-controls {
+        flex-basis: 34px;
+    }
+
+    .closest-panel {
+        flex-basis: 260px;
+        min-height: 218px;
+        padding: 11px 14px 10px 16px;
+    }
+
+    .panel-heading {
+        margin-bottom: 7px;
+    }
+
+    .closest-callsign {
+        min-height: 34px;
+        font-size: clamp(1.7rem, 3.2vw, 2.15rem);
+    }
+
+    .aircraft-type {
+        margin-top: 2px;
+        font-size: 0.8rem;
+    }
+
+    .aircraft-visual {
+        top: 39px;
+        right: 14px;
+        width: 88px;
+        height: 64px;
+    }
+
+    .closest-callsign,
+    .aircraft-type {
+        max-width: calc(100% - 100px);
+    }
+
+    .metric-grid {
+        gap: 6px;
+        margin-top: 8px;
+    }
+
+    .metric {
+        padding: 6px 7px 5px;
+    }
+
+    .metric-label {
+        margin-bottom: 2px;
+        font-size: 0.61rem;
+    }
+
+    .metric-value {
+        font-size: 0.88rem;
+    }
+
+    .route-strip {
+        min-height: 52px;
+        margin-top: 7px;
+        padding-top: 5px;
+        padding-bottom: 5px;
+    }
+
+    .route-logo-slot {
+        height: 34px;
+    }
+
+    .route-airport-name {
+        -webkit-line-clamp: 1;
+    }
+
+    .traffic-heading {
+        min-height: 38px;
+    }
+
+    .aircraft-list-header {
+        padding-top: 6px;
+        padding-bottom: 5px;
+    }
+
+    .aircraft-row {
+        min-height: 36px;
+    }
+}
+
 @media (max-width: 720px) {
     body {
+        place-items: start center;
         overflow: auto;
     }
 
     .container {
         min-height: 100vh;
+        min-height: 100dvh;
         height: auto;
         flex-direction: column;
     }
@@ -1021,10 +1162,45 @@ body {
     .left-panel {
         width: 100%;
         min-width: 0;
-        height: 600px;
+        height: min(600px, 100vh);
+        height: min(600px, 100dvh);
+        min-height: 520px;
+        flex-basis: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
     }
 
     .right-panel {
-        min-height: 500px;
+        flex: 0 0 max(420px, 65vh);
+        flex-basis: max(420px, 65dvh);
+        min-height: 420px;
+    }
+}
+
+@media (max-width: 480px) {
+    .mode-button {
+        gap: 5px;
+        font-size: 0.69rem;
+        letter-spacing: 0.07em;
+    }
+
+    .range-controls {
+        gap: 7px;
+        padding-right: 10px;
+        padding-left: 12px;
+    }
+
+    .closest-panel {
+        padding-right: 14px;
+        padding-left: 16px;
+    }
+
+    .coordinate-form {
+        padding: 18px;
+    }
+
+    .coordinate-fields,
+    .coordinate-actions {
+        grid-template-columns: 1fr;
     }
 }

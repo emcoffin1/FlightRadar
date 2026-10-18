@@ -16,6 +16,22 @@ const map = L.map("map", {
     zoomControl: true
 }).setView(currentCenter, 11);
 
+// Leaflet listens for window resizes, but the map can also change size when
+// responsive layout rules reflow the sidebar. Observe its panel directly so
+// tiles and controls always fill the newly available space.
+const mapPanel = document.querySelector(".right-panel");
+let mapResizeFrame;
+let mapResizeObserver;
+if (mapPanel && "ResizeObserver" in window) {
+    mapResizeObserver = new ResizeObserver(() => {
+        window.cancelAnimationFrame(mapResizeFrame);
+        mapResizeFrame = window.requestAnimationFrame(() => {
+            map.invalidateSize({ pan: false });
+        });
+    });
+    mapResizeObserver.observe(mapPanel);
+}
+
 L.tileLayer("/tiles/{z}/{x}/{y}.png", {
     minZoom: 7,
     maxZoom: 12,
