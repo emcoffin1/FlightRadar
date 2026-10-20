@@ -835,7 +835,11 @@ function displayRoute(aircraft, isLoading = false) {
     }
 }
 
-function displayPrimaryAircraft(aircraft, routeIsLoading = false) {
+function displayPrimaryAircraft(
+    aircraft,
+    routeIsLoading = false,
+    updateRoute = true
+) {
     if (!aircraft) {
         clearPrimaryAircraft();
         return;
@@ -847,7 +851,9 @@ function displayPrimaryAircraft(aircraft, routeIsLoading = false) {
     displayNumber("closest-alt_baro", aircraft.alt_baro, 0, " ft");
     displayNumber("closest-gs", aircraft.gs, 1, " kt");
     displayAircraftImage(aircraft);
-    displayRoute(aircraft, routeIsLoading);
+    if (updateRoute) {
+        displayRoute(aircraft, routeIsLoading);
+    }
 }
 
 function listValue(value) {
@@ -1027,10 +1033,23 @@ function updateAirportMarkers() {
         const airportId = String(airport.source_id);
         visibleAirportIds.add(airportId);
         let marker = airportMarkers.get(airportId);
+        const iconKey = [
+            airport.display_code || airport.ident,
+            airportIsRouteAirport(airport) ? "route" : "normal"
+        ].join(":");
 
         if (marker) {
-            marker.setIcon(airportMapIcon(airport));
-            marker.setLatLng([airport.lat, airport.lon]);
+            // setIcon() replaces the marker's DOM node, so only use it when
+            // the label or route-highlight state actually changes.
+            if (marker.airportIconKey !== iconKey) {
+                marker.setIcon(airportMapIcon(airport));
+                marker.airportIconKey = iconKey;
+            }
+
+            const position = marker.getLatLng();
+            if (position.lat !== airport.lat || position.lng !== airport.lon) {
+                marker.setLatLng([airport.lat, airport.lon]);
+            }
         } else {
             marker = L.marker([airport.lat, airport.lon], {
                 pane: "airportPane",
@@ -1038,6 +1057,7 @@ function updateAirportMarkers() {
                 keyboard: true,
                 title: `${airport.display_code} — ${airport.name}`
             });
+            marker.airportIconKey = iconKey;
             marker.bindPopup(airportPopup(airport), {
                 className: "airport-map-popup",
                 maxWidth: 280
@@ -1069,8 +1089,15 @@ function setRouteAirportHighlights(aircraft) {
         }
     }
 
-    routeAirportCodes = nextCodes;
-    updateAirportMarkers();
+    const routeChanged = (
+        nextCodes.size !== routeAirportCodes.size ||
+        Array.from(nextCodes).some((code) => !routeAirportCodes.has(code))
+    );
+
+    if (routeChanged) {
+        routeAirportCodes = nextCodes;
+        updateAirportMarkers();
+    }
 }
 
 async function loadAirports() {
@@ -1436,13 +1463,20 @@ async function loadPrimaryAircraft(aircraftHex) {
     const basicAircraft = visibleAircraft.find(
         (item) => item.hex === aircraftHex
     );
+    const selectionChanged = primaryPathHex !== aircraftHex;
 
-    if (primaryPathHex !== aircraftHex) {
+    if (selectionChanged) {
         clearPrimaryAircraftPath();
         setRouteAirportHighlights(null);
     }
 
-    displayPrimaryAircraft(basicAircraft, true);
+    // Preserve known airport/route details during the routine one-second
+    // position refresh. Show the loading state only for a new aircraft.
+    displayPrimaryAircraft(
+        basicAircraft,
+        selectionChanged,
+        selectionChanged
+    );
 
     try {
         const response = await fetch(aircraftDetailUrl(aircraftHex));
