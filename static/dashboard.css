@@ -332,6 +332,69 @@ body {
     box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
+.coordinate-keypad {
+    margin-top: 12px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(8, 7, 6, 0.72);
+}
+
+.coordinate-keypad[hidden] {
+    display: none;
+}
+
+.coordinate-keypad-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-family: "Share Tech Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.coordinate-keypad-header strong {
+    color: var(--accent);
+    font-weight: 400;
+}
+
+.coordinate-keypad-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 7px;
+}
+
+.coordinate-keypad-grid button {
+    min-height: 42px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    color: var(--text);
+    background: var(--surface-raised);
+    font: 1rem "Share Tech Mono", monospace;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.coordinate-keypad-grid button:hover,
+.coordinate-keypad-grid button:focus-visible {
+    color: var(--accent);
+    border-color: var(--accent);
+    outline: none;
+}
+
+.coordinate-keypad-grid button:active {
+    background: var(--accent-soft);
+}
+
+.coordinate-keypad-done {
+    grid-column: span 2;
+    color: #17120a !important;
+    border-color: var(--accent) !important;
+    background: var(--accent) !important;
+}
+
 .receiver-settings {
     display: grid;
     gap: 12px;

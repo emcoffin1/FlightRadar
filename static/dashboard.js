@@ -334,6 +334,10 @@ const coordinateButton = document.getElementById("coords-button");
 const coordinateClose = document.getElementById("coordinate-close");
 const latitudeInput = document.getElementById("coordinate-lat");
 const longitudeInput = document.getElementById("coordinate-lon");
+const coordinateKeypad = document.getElementById("coordinate-keypad");
+const coordinateKeypadLabel = document.getElementById(
+    "coordinate-keypad-label"
+);
 const localReceiverInput = document.getElementById("local-receiver-enabled");
 const receiverAddressInput = document.getElementById("receiver-address");
 const receiverBeastPortInput = document.getElementById("receiver-beast-port");
@@ -341,6 +345,7 @@ const adsblolInput = document.getElementById("adsblol-enabled");
 const deviceLocationButton = document.getElementById("device-location-button");
 const saveCoordinatesButton = document.getElementById("save-coordinates-button");
 const coordinateStatus = document.getElementById("coordinate-status");
+let activeCoordinateInput = null;
 
 function setCoordinateStatus(message, isError = false) {
     coordinateStatus.textContent = message;
@@ -361,6 +366,68 @@ function readCoordinateInput(input, minimum, maximum, label) {
     }
 
     return value;
+}
+
+function showCoordinateKeypad(input) {
+    activeCoordinateInput = input;
+    coordinateKeypadLabel.textContent = input === latitudeInput
+        ? "Latitude"
+        : "Longitude";
+    coordinateKeypad.hidden = false;
+}
+
+function replaceCoordinateSelection(input, text) {
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    input.setRangeText(text, start, end, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function handleCoordinateKeypad(event) {
+    const button = event.target.closest("button");
+    if (!button || !activeCoordinateInput) {
+        return;
+    }
+
+    const key = button.dataset.coordinateKey;
+    const action = button.dataset.coordinateAction;
+
+    if (key !== undefined) {
+        if (key !== "." || !activeCoordinateInput.value.includes(".")) {
+            replaceCoordinateSelection(activeCoordinateInput, key);
+        }
+    } else if (action === "clear") {
+        activeCoordinateInput.value = "";
+        activeCoordinateInput.dispatchEvent(
+            new Event("input", { bubbles: true })
+        );
+    } else if (action === "sign") {
+        activeCoordinateInput.value = activeCoordinateInput.value.startsWith("-")
+            ? activeCoordinateInput.value.slice(1)
+            : `-${activeCoordinateInput.value}`;
+        activeCoordinateInput.dispatchEvent(
+            new Event("input", { bubbles: true })
+        );
+    } else if (action === "backspace") {
+        const start = activeCoordinateInput.selectionStart ?? 0;
+        const end = activeCoordinateInput.selectionEnd ?? start;
+        if (start !== end) {
+            activeCoordinateInput.setRangeText("", start, end, "end");
+        } else if (start > 0) {
+            activeCoordinateInput.setRangeText(
+                "",
+                start - 1,
+                start,
+                "end"
+            );
+        }
+        activeCoordinateInput.dispatchEvent(
+            new Event("input", { bubbles: true })
+        );
+    } else if (action === "done") {
+        coordinateKeypad.hidden = true;
+        activeCoordinateInput = null;
+    }
 }
 
 function displayCoordinates(coordinates) {
@@ -586,6 +653,13 @@ coordinateButton.addEventListener("click", openCoordinateDialog);
 coordinateClose.addEventListener("click", closeCoordinateDialog);
 deviceLocationButton.addEventListener("click", useDeviceLocation);
 coordinateForm.addEventListener("submit", saveCoordinates);
+latitudeInput.addEventListener("focus", () => {
+    showCoordinateKeypad(latitudeInput);
+});
+longitudeInput.addEventListener("focus", () => {
+    showCoordinateKeypad(longitudeInput);
+});
+coordinateKeypad.addEventListener("click", handleCoordinateKeypad);
 localReceiverInput.addEventListener("change", () => {
     saveSourceToggle(
         localReceiverInput,
@@ -598,6 +672,8 @@ adsblolInput.addEventListener("change", () => {
 });
 coordinateDialog.addEventListener("close", () => {
     coordinateButton.classList.remove("is-active");
+    coordinateKeypad.hidden = true;
+    activeCoordinateInput = null;
     setCoordinateStatus("");
 });
 

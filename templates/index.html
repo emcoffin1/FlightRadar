@@ -239,6 +239,50 @@
                     </div>
                 </div>
 
+                <div
+                    class="coordinate-keypad"
+                    id="coordinate-keypad"
+                    aria-label="Coordinate keypad"
+                    hidden
+                >
+                    <div class="coordinate-keypad-header">
+                        <span>Editing</span>
+                        <strong id="coordinate-keypad-label">Latitude</strong>
+                    </div>
+                    <div class="coordinate-keypad-grid">
+                        <button type="button" data-coordinate-key="7">7</button>
+                        <button type="button" data-coordinate-key="8">8</button>
+                        <button type="button" data-coordinate-key="9">9</button>
+                        <button
+                            type="button"
+                            data-coordinate-action="backspace"
+                            aria-label="Backspace"
+                        >&#9003;</button>
+                        <button type="button" data-coordinate-key="4">4</button>
+                        <button type="button" data-coordinate-key="5">5</button>
+                        <button type="button" data-coordinate-key="6">6</button>
+                        <button
+                            type="button"
+                            data-coordinate-action="clear"
+                        >Clear</button>
+                        <button type="button" data-coordinate-key="1">1</button>
+                        <button type="button" data-coordinate-key="2">2</button>
+                        <button type="button" data-coordinate-key="3">3</button>
+                        <button
+                            type="button"
+                            data-coordinate-action="sign"
+                            aria-label="Toggle negative sign"
+                        >&minus;</button>
+                        <button type="button" data-coordinate-key="0">0</button>
+                        <button type="button" data-coordinate-key=".">.</button>
+                        <button
+                            class="coordinate-keypad-done"
+                            type="button"
+                            data-coordinate-action="done"
+                        >Done</button>
+                    </div>
+                </div>
+
                 <div class="receiver-settings">
                     <label class="dialog-switch" for="local-receiver-enabled">
                         <input
