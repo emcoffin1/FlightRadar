@@ -347,6 +347,22 @@ function setCoordinateStatus(message, isError = false) {
     coordinateStatus.classList.toggle("is-error", isError);
 }
 
+function readCoordinateInput(input, minimum, maximum, label) {
+    const text = input.value.trim();
+    const value = Number(text);
+
+    if (
+        text === "" ||
+        !Number.isFinite(value) ||
+        value < minimum ||
+        value > maximum
+    ) {
+        throw new Error(`${label} must be between ${minimum} and ${maximum}.`);
+    }
+
+    return value;
+}
+
 function displayCoordinates(coordinates) {
     // Device geolocation only supplies lat/lon. Do not erase receiver and
     // adsb.lol settings when applying that partial update to the form.
@@ -456,6 +472,21 @@ async function saveCoordinates(event) {
         return;
     }
 
+    let latitude;
+    let longitude;
+    try {
+        latitude = readCoordinateInput(latitudeInput, -90, 90, "Latitude");
+        longitude = readCoordinateInput(
+            longitudeInput,
+            -180,
+            180,
+            "Longitude"
+        );
+    } catch (error) {
+        setCoordinateStatus(error.message, true);
+        return;
+    }
+
     saveCoordinatesButton.disabled = true;
     setCoordinateStatus("Saving center coordinates...");
 
@@ -466,8 +497,8 @@ async function saveCoordinates(event) {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                lat: Number(latitudeInput.value),
-                lon: Number(longitudeInput.value),
+                lat: latitude,
+                lon: longitude,
                 local_receiver_enabled: localReceiverInput.checked,
                 receiver_address: receiverAddressInput.value.trim(),
                 receiver_beast_port: Number(receiverBeastPortInput.value),
@@ -500,12 +531,19 @@ async function saveCoordinates(event) {
 async function saveSourceToggle(input, settingName, label) {
     const enabled = input.checked;
     const payload = { [settingName]: enabled };
-    const latitude = latitudeInput.valueAsNumber;
-    const longitude = longitudeInput.valueAsNumber;
+    const latitudeText = latitudeInput.value.trim();
+    const longitudeText = longitudeInput.value.trim();
+    const latitude = Number(latitudeText);
+    const longitude = Number(longitudeText);
 
     // Include the displayed center for compatibility with a Flask process
     // that has not reloaded the partial-settings endpoint yet.
-    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    if (
+        latitudeText !== "" &&
+        longitudeText !== "" &&
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude)
+    ) {
         payload.lat = latitude;
         payload.lon = longitude;
     }

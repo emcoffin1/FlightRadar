@@ -228,6 +228,9 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="local-receiver-enabled"', page)
         self.assertIn('id="adsblol-enabled"', page)
+        self.assertIn('id="coordinate-lat"', page)
+        self.assertIn('inputmode="decimal"', page)
+        self.assertNotIn('name="lat"\n                            type="number"', page)
         self.assertIn("aircraftRefreshMs: 1000", page)
 
 
