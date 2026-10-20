@@ -235,9 +235,12 @@ body {
 }
 
 .coordinate-dialog {
-    width: min(430px, calc(100vw - 32px));
+    width: min(560px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
     margin: auto;
     padding: 0;
+    overflow-y: auto;
     border: 1px solid var(--line);
     border-radius: 5px;
     color: var(--text);
@@ -327,6 +330,59 @@ body {
     border-color: var(--accent);
     outline: none;
     box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.receiver-settings {
+    display: grid;
+    gap: 12px;
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line-soft);
+}
+
+.receiver-address-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 112px;
+    gap: 12px;
+}
+
+.dialog-switch {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.dialog-switch input {
+    width: 17px;
+    height: 17px;
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+}
+
+.dialog-switch span,
+.dialog-switch strong,
+.dialog-switch small {
+    display: block;
+}
+
+.dialog-switch strong {
+    font-size: 0.82rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.dialog-switch small,
+.receiver-help {
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.35;
+}
+
+.receiver-help {
+    margin: -5px 0 0;
 }
 
 .coordinate-actions {
@@ -1252,6 +1308,10 @@ body {
         flex-basis: auto;
         border-right: 0;
         border-bottom: 1px solid var(--line);
+    }
+
+    .receiver-address-fields {
+        grid-template-columns: 1fr;
     }
 
     .right-panel {

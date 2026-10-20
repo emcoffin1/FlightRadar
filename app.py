@@ -42,12 +42,13 @@ from database import (
     ensure_aircraft_schema,
     ensure_mode_settings,
 )
+from local_receiver import receiver_json_location
 from config import (
+    AIRCRAFT_REFRESH_SECONDS,
     AIRPORT_DATA_PATH,
     MAX_TILE_RADIUS_NM,
     OSM_TILE_URL,
     OSM_TILE_USER_AGENT,
-    REFRESH_TIME,
     SEARCH_RANGE_OPTIONS,
     TILE_CACHE_DIR,
     TILE_CACHE_MIN_SECONDS,
@@ -342,7 +343,17 @@ def serialize_aircraft(row):
         aircraft.get("callsign"),
     )
     aircraft["aircraft_icon"] = aircraft_icon_url(aircraft.get("t"))
+    is_helicopter = aircraft.get("category") == "Rotorcraft/Helicopter"
+    if is_helicopter:
+        type_code = str(aircraft.get("t") or "").strip().upper()
+        if (
+            type_code not in AIRCRAFT_IMAGE_FILES
+            and type_code not in AIRCRAFT_IMAGE_ALIASES
+        ):
+            aircraft["aircraft_icon"] = aircraft_icon_url("R44")
     aircraft["aircraft_image"] = aircraft_image_url(aircraft.get("t"))
+    if is_helicopter and aircraft["aircraft_image"] is None:
+        aircraft["aircraft_image"] = aircraft_image_url("R44")
     aircraft["is_private"] = is_private_aircraft(aircraft)
     return aircraft
 
@@ -457,6 +468,12 @@ def serialize_coordinates(row):
     return {
         "lat": float(row["center_lat"]),
         "lon": float(row["center_lon"]),
+        "local_receiver_enabled": bool(row["local_receiver_enabled"]),
+        "receiver_address": row["receiver_address"],
+        "receiver_beast_port": int(row["receiver_beast_port"]),
+        "adsblol_enabled": bool(row["adsblol_feed_enabled"]),
+        # Retained for clients using the original feed-only setting name.
+        "adsblol_feed_enabled": bool(row["adsblol_feed_enabled"]),
     }
 
 
@@ -664,7 +681,7 @@ def hello_world():
 
     return render_template(
         "index.html",
-        aircraft_refresh_ms=int(REFRESH_TIME * 1000),
+        aircraft_refresh_ms=int(AIRCRAFT_REFRESH_SECONDS * 1000),
         map_center=[
             float(coordinates["center_lat"]),
             float(coordinates["center_lon"]),
@@ -797,7 +814,8 @@ def get_all_aircraft():
                 lat,
                 lon,
                 track,
-                gs
+                gs,
+                category
             FROM adsb_data
             WHERE range IS NOT NULL
                 AND range <= ?
@@ -896,20 +914,103 @@ def coordinate_settings():
             if not isinstance(data, dict):
                 return jsonify({"error": "Expected a JSON object"}), 400
 
+            current = conn.execute("""
+                SELECT center_lat,
+                    center_lon,
+                    local_receiver_enabled,
+                    receiver_address,
+                    receiver_beast_port,
+                    adsblol_feed_enabled
+                FROM app_settings
+                WHERE id = 1
+            """).fetchone()
+
             try:
-                latitude = parse_coordinate(data, "lat", -90, 90)
-                longitude = parse_coordinate(data, "lon", -180, 180)
+                latitude = (
+                    parse_coordinate(data, "lat", -90, 90)
+                    if "lat" in data
+                    else float(current["center_lat"])
+                )
+                longitude = (
+                    parse_coordinate(data, "lon", -180, 180)
+                    if "lon" in data
+                    else float(current["center_lon"])
+                )
             except ValueError as error:
                 return jsonify({"error": str(error)}), 400
 
+            for name in (
+                "local_receiver_enabled",
+                "adsblol_enabled",
+                "adsblol_feed_enabled",
+            ):
+                if name in data and not isinstance(data[name], bool):
+                    return jsonify({"error": f"{name} must be true or false"}), 400
+
+            receiver_address = str(data.get(
+                "receiver_address",
+                current["receiver_address"],
+            )).strip()
+            if not receiver_address or len(receiver_address) > 2048:
+                return jsonify({
+                    "error": "receiver_address must not be empty",
+                }), 400
+            if "\n" in receiver_address or "\r" in receiver_address:
+                return jsonify({"error": "receiver_address is invalid"}), 400
+            try:
+                receiver_json_location(receiver_address)
+            except ValueError as error:
+                return jsonify({"error": str(error)}), 400
+
+            beast_port = data.get(
+                "receiver_beast_port",
+                current["receiver_beast_port"],
+            )
+            if isinstance(beast_port, bool):
+                beast_port = None
+            try:
+                beast_port = int(beast_port)
+            except (TypeError, ValueError):
+                beast_port = None
+            if beast_port is None or not 1 <= beast_port <= 65535:
+                return jsonify({
+                    "error": "receiver_beast_port must be between 1 and 65535",
+                }), 400
+
             conn.execute("""
                 UPDATE app_settings
-                SET center_lat = ?, center_lon = ?
+                SET center_lat = ?,
+                    center_lon = ?,
+                    local_receiver_enabled = ?,
+                    receiver_address = ?,
+                    receiver_beast_port = ?,
+                    adsblol_feed_enabled = ?
                 WHERE id = 1
-            """, (latitude, longitude))
+            """, (
+                latitude,
+                longitude,
+                int(data.get(
+                    "local_receiver_enabled",
+                    bool(current["local_receiver_enabled"]),
+                )),
+                receiver_address,
+                beast_port,
+                int(data.get(
+                    "adsblol_enabled",
+                    data.get(
+                        "adsblol_feed_enabled",
+                        bool(current["adsblol_feed_enabled"]),
+                    ),
+                )),
+            ))
 
         coordinates = conn.execute("""
-            SELECT center_lat, center_lon
+            SELECT center_lat,
+                center_lon,
+                local_receiver_enabled,
+                receiver_address,
+                receiver_beast_port,
+                adsblol_feed_enabled
             FROM app_settings
             WHERE id = 1
         """).fetchone()

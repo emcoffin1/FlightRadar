@@ -27,6 +27,7 @@ ENV/
 
 # Downloaded map-tile cache
 static/tiles/
+data/aircraft.csv.gz
 
 # Logs, coverage, and test output
 *.log
@@ -50,3 +51,4 @@ Thumbs.db
 .agents/
 .codex/
 .aws/
+.runtime/

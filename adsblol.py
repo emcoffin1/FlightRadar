@@ -54,8 +54,13 @@ def decode_flags(db_flags: int) -> list:
 
 
 def decode_category(cat: str) -> str:
-    if cat[0] in CATEGORY_NAMES:
-        return CATEGORY_NAMES[cat[0]][int(cat[1])]
+    try:
+        return CATEGORY_NAMES[cat[0]].get(
+            int(cat[1]),
+            "No Category Information",
+        )
+    except (IndexError, KeyError, TypeError, ValueError):
+        return "No Category Information"
 
 
 class ADSB_LOL:
@@ -200,7 +205,9 @@ class ADSB_LOL:
         
             plane = {}
 
-            plane['hex'] = ac['hex'].strip() if 'hex' in ac else "NA"
+            plane['hex'] = (
+                ac['hex'].strip().lower() if 'hex' in ac else "NA"
+            )
 
             if 'flight' in ac:
                 callsign = ac['flight'].strip()
@@ -214,10 +221,10 @@ class ADSB_LOL:
 
             plane['r'] = ac['r'].strip() if 'r' in ac else "NA"
 
-            if 'lat' and 'lon' in ac:
+            if 'lat' in ac and 'lon' in ac:
                 lat = ac['lat']
                 lon = ac['lon']
-            elif 'rr_lat' and 'rr_lon' in ac:
+            elif 'rr_lat' in ac and 'rr_lon' in ac:
                 lat = ac['rr_lat']
                 lon = ac['rr_lon']
             elif 'lastPosition' in ac:
@@ -255,7 +262,9 @@ class ADSB_LOL:
                 gs = "NA"
             plane['gs'] = gs 
 
-            plane['type'] = ac['type']
+            # readsb uses ``t`` for the ICAO aircraft type.  The public API
+            # sometimes also supplies a descriptive ``type`` field.
+            plane['type'] = ac.get('type', "NA")
 
             plane['category'] = decode_category(ac['category']) if 'category' in ac else "NA"
 

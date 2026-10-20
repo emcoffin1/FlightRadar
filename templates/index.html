@@ -237,6 +237,65 @@
                     </div>
                 </div>
 
+                <div class="receiver-settings">
+                    <label class="dialog-switch" for="local-receiver-enabled">
+                        <input
+                            id="local-receiver-enabled"
+                            name="local_receiver_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>Use local receiver</strong>
+                            <small>Poll readsb aircraft data every second</small>
+                        </span>
+                    </label>
+
+                    <div class="receiver-address-fields">
+                        <div class="coordinate-field">
+                            <label for="receiver-address">Receiver address</label>
+                            <input
+                                class="coordinate-input"
+                                id="receiver-address"
+                                name="receiver_address"
+                                type="text"
+                                maxlength="2048"
+                                required
+                                spellcheck="false"
+                                placeholder="/run/readsb/aircraft.json"
+                            >
+                        </div>
+                        <div class="coordinate-field">
+                            <label for="receiver-beast-port">Beast port</label>
+                            <input
+                                class="coordinate-input"
+                                id="receiver-beast-port"
+                                name="receiver_beast_port"
+                                type="number"
+                                min="1"
+                                max="65535"
+                                required
+                            >
+                        </div>
+                    </div>
+                    <p class="receiver-help">
+                        Use a local JSON path, a full aircraft.json URL, or a
+                        receiver hostname/IP. Hostnames use
+                        /readsb/aircraft.json.
+                    </p>
+
+                    <label class="dialog-switch" for="adsblol-enabled">
+                        <input
+                            id="adsblol-enabled"
+                            name="adsblol_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>Use adsb.lol</strong>
+                            <small>Retrieve public data and feed local Beast data</small>
+                        </span>
+                    </label>
+                </div>
+
                 <div class="coordinate-actions">
                     <button
                         class="dialog-button"
@@ -247,7 +306,7 @@
                         class="dialog-button primary"
                         id="save-coordinates-button"
                         type="submit"
-                    >Apply coordinates</button>
+                    >Apply settings</button>
                 </div>
 
                 <p

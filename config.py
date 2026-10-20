@@ -11,11 +11,21 @@ AIRCRAFT_IMAGE_DIR = APP_DIR / "static" / "aircraft"
 AIRCRAFT_PHOTO_DIR = APP_DIR / "static" / "aircraft_photos"
 TILE_CACHE_DIR = APP_DIR / "static" / "tiles"
 AIRPORT_DATA_PATH = APP_DIR / "data" / "ourairports-airports.csv"
+AIRCRAFT_METADATA_PATH = APP_DIR / "data" / "aircraft.csv.gz"
+RUNTIME_DIR = APP_DIR / ".runtime"
 
-REFRESH_TIME = 15
+# Local receiver data changes once per second.  Keep the browser in step with
+# it, while rate-limiting the public adsb.lol API independently.
+AIRCRAFT_REFRESH_SECONDS = 1
+LOCAL_RECEIVER_POLL_SECONDS = 1
+ADSB_LOL_POLL_SECONDS = 30
 DEFAULT_LAT = 33.512561467820056
 DEFAULT_LON = -117.11927031211901
 DEFAULT_SEARCH_RANGE = 25
+DEFAULT_LOCAL_RECEIVER_ENABLED = True
+DEFAULT_RECEIVER_ADDRESS = "/run/readsb/aircraft.json"
+DEFAULT_RECEIVER_BEAST_PORT = 30005
+DEFAULT_ADSB_LOL_FEED_ENABLED = False
 SEARCH_RANGE_OPTIONS = {15, 25, 50}
 MAX_COLLECTION_RANGE = 50
 STALE_PASS_LIMIT = 3

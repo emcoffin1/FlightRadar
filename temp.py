@@ -1,22 +1,29 @@
-from time import sleep, time
+import atexit
+import logging
+from time import monotonic, sleep, time
 
 import requests
 
 from adsblol import ADSB_LOL
 from database import (
     connect_database,
+    ensure_aircraft_metadata,
     ensure_aircraft_schema,
     ensure_mode_settings,
 )
 from config import (
+    ADSB_LOL_POLL_SECONDS,
     DATABASE_PATH,
+    LOCAL_RECEIVER_POLL_SECONDS,
     MAX_COLLECTION_RANGE,
     POSITION_CHANGE_EPSILON,
-    REFRESH_TIME,
+    RUNTIME_DIR,
     STALE_PASS_LIMIT,
 )
+from local_receiver import ADSBLolFeeder, LocalReceiver
 
 
+LOGGER = logging.getLogger("adsb_display.collector")
 
 class Database:
     def __init__(self, db_path=DATABASE_PATH):
@@ -44,6 +51,40 @@ class Database:
         with self.connect() as conn:
             ensure_aircraft_schema(conn, create_table=True)
             ensure_mode_settings(conn)
+            metadata_count = ensure_aircraft_metadata(conn)
+        if metadata_count:
+            LOGGER.info("Local aircraft metadata available: %s records", metadata_count)
+
+    def enrich_local_aircraft(self, data):
+        aircraft = data.get("ac", [])
+        aircraft_hexes = {
+            str(item.get("hex") or "").strip().lower()
+            for item in aircraft
+            if item.get("hex")
+        }
+        if not aircraft_hexes:
+            return data
+
+        placeholders = ",".join("?" for _ in aircraft_hexes)
+        with self.connect() as conn:
+            rows = conn.execute(f"""
+                SELECT hex, registration, type_code, db_flags
+                FROM aircraft_metadata
+                WHERE hex IN ({placeholders})
+            """, tuple(aircraft_hexes)).fetchall()
+        metadata = {row[0]: row for row in rows}
+
+        for item in aircraft:
+            row = metadata.get(str(item.get("hex") or "").strip().lower())
+            if row is None:
+                continue
+            if not item.get("r") and row[1]:
+                item["r"] = row[1]
+            if not item.get("t") and row[2]:
+                item["t"] = row[2]
+            if "dbFlags" not in item and row[3]:
+                item["dbFlags"] = row[3]
+        return data
 
     def get_modes(self):
         settings = self.execute_query("""
@@ -70,7 +111,11 @@ class Database:
                 military_enabled,
                 search_range_nm,
                 center_lat,
-                center_lon
+                center_lon,
+                local_receiver_enabled,
+                receiver_address,
+                receiver_beast_port,
+                adsblol_feed_enabled
             FROM app_settings
             WHERE id = 1
         """)[0]
@@ -81,6 +126,10 @@ class Database:
             int(settings[2]),
             float(settings[3]),
             float(settings[4]),
+            bool(settings[5]),
+            str(settings[6]),
+            int(settings[7]),
+            bool(settings[8]),
         )
 
     def _record_position(self, conn, aircraft_id, aircraft, recorded_at):
@@ -270,9 +319,43 @@ class Database:
             self._age_missing_aircraft(conn, current_aircraft_ids)
 
 
+def filter_modes(aircraft, normal_enabled, military_enabled):
+    if normal_enabled and military_enabled:
+        return aircraft
+    if not normal_enabled and not military_enabled:
+        return []
+    if military_enabled:
+        return [item for item in aircraft if "Military" in item.get("flag", [])]
+    return [item for item in aircraft if "Military" not in item.get("flag", [])]
+
+
+def merge_aircraft(remote_aircraft, local_aircraft):
+    """Merge snapshots by ICAO, preferring live receiver values."""
+    merged = {item["hex"]: item.copy() for item in remote_aircraft}
+    metadata_keys = ("t", "r", "type", "category", "flag")
+
+    for local in local_aircraft:
+        existing = merged.get(local["hex"], {})
+        combined = {**existing, **local}
+        for key in metadata_keys:
+            if local.get(key) in (None, "", "NA", ["NA"]):
+                combined[key] = existing.get(key, local.get(key))
+        merged[local["hex"]] = combined
+
+    return list(merged.values())
+
+
 def run_collector():
     adsb = ADSB_LOL()
+    local_receiver = LocalReceiver()
+    feeder = ADSBLolFeeder(RUNTIME_DIR)
+    atexit.register(feeder.stop)
     db = Database()
+    remote_aircraft = []
+    local_aircraft = []
+    remote_due = 0
+    previous_remote_settings = None
+    local_failures = 0
 
     while True:
         (
@@ -281,50 +364,82 @@ def run_collector():
             display_range,
             center_lat,
             center_lon,
+            local_enabled,
+            receiver_address,
+            receiver_beast_port,
+            adsblol_enabled,
         ) = db.get_collection_settings()
         adsb.LAT = center_lat
         adsb.LON = center_lon
         adsb.RANGE = MAX_COLLECTION_RANGE
+        feeder.sync(
+            local_enabled and adsblol_enabled,
+            receiver_address,
+            receiver_beast_port,
+        )
 
-        try:
-            data = adsb.GET_all(
-                range=MAX_COLLECTION_RANGE,
-                military=military_enabled,
-                normal=normal_enabled,
-            )
-            db.update_ac(data)
+        remote_settings = (
+            center_lat,
+            center_lon,
+        )
+        if remote_settings != previous_remote_settings:
+            remote_due = 0
+            previous_remote_settings = remote_settings
 
-            print(
-                "Updated "
-                f"(normal={'on' if normal_enabled else 'off'}, "
-                f"military={'on' if military_enabled else 'off'}, "
-                f"collection_range={MAX_COLLECTION_RANGE} nm, "
-                f"display_range={display_range} nm, "
-                f"center={center_lat:.6f},{center_lon:.6f})"
-            )
-            print(db.execute_query("SELECT COUNT(*) FROM adsb_data"))
-
-        except requests.exceptions.Timeout as error:
-            print(f"Aircraft API timed out: {error}")
-
-        except requests.exceptions.HTTPError as error:
-            if error.response is not None and error.response.status_code == 429:
-                retry_after = int(
-                    error.response.headers.get("Retry-After", 60)
+        if local_enabled:
+            try:
+                local_payload = local_receiver.get_aircraft(receiver_address)
+                local_payload = db.enrich_local_aircraft(local_payload)
+                local_aircraft = adsb._filter_format(
+                    local_payload,
+                    max_range=MAX_COLLECTION_RANGE,
                 )
-                print(
-                    f"Rate limited by adsb.lol; "
-                    f"waiting {retry_after} seconds"
-                )
-                sleep(retry_after)
-                continue
+                local_failures = 0
+            except (OSError, ValueError, requests.exceptions.RequestException) as error:
+                local_failures += 1
+                if local_failures >= STALE_PASS_LIMIT:
+                    local_aircraft = []
+                if local_failures == 1 or local_failures % 30 == 0:
+                    LOGGER.warning(
+                        "Local readsb poll failed (%s consecutive): %s",
+                        local_failures,
+                        error,
+                    )
+        else:
+            local_aircraft = []
+            local_failures = 0
 
-            print(f"Aircraft API HTTP error: {error}")
+        now = monotonic()
+        if not adsblol_enabled:
+            remote_aircraft = []
+            remote_due = 0
+        elif now >= remote_due:
+            remote_due = now + ADSB_LOL_POLL_SECONDS
+            try:
+                remote_aircraft = adsb.GET_point(range=MAX_COLLECTION_RANGE)
+            except requests.exceptions.HTTPError as error:
+                if error.response is not None and error.response.status_code == 429:
+                    retry_after = int(error.response.headers.get("Retry-After", 60))
+                    remote_due = now + max(retry_after, ADSB_LOL_POLL_SECONDS)
+                    LOGGER.warning("Rate limited by adsb.lol for %s seconds", retry_after)
+                else:
+                    LOGGER.warning("adsb.lol HTTP error: %s", error)
+            except requests.exceptions.RequestException as error:
+                LOGGER.warning("adsb.lol request failed: %s", error)
 
-        except requests.exceptions.RequestException as error:
-            print(f"Aircraft API request failed: {error}")
-
-        sleep(REFRESH_TIME)
+        data = filter_modes(
+            merge_aircraft(remote_aircraft, local_aircraft),
+            normal_enabled,
+            military_enabled,
+        )
+        db.update_ac(data)
+        LOGGER.debug(
+            "Updated %s aircraft (local=%s, adsb.lol=%s, range=%s nm, "
+            "center=%.6f,%.6f)",
+            len(data), len(local_aircraft), len(remote_aircraft), display_range,
+            center_lat, center_lon,
+        )
+        sleep(LOCAL_RECEIVER_POLL_SECONDS)
 
 
 if __name__ == "__main__":

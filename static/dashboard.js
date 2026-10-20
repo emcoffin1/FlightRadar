@@ -334,6 +334,10 @@ const coordinateButton = document.getElementById("coords-button");
 const coordinateClose = document.getElementById("coordinate-close");
 const latitudeInput = document.getElementById("coordinate-lat");
 const longitudeInput = document.getElementById("coordinate-lon");
+const localReceiverInput = document.getElementById("local-receiver-enabled");
+const receiverAddressInput = document.getElementById("receiver-address");
+const receiverBeastPortInput = document.getElementById("receiver-beast-port");
+const adsblolInput = document.getElementById("adsblol-enabled");
 const deviceLocationButton = document.getElementById("device-location-button");
 const saveCoordinatesButton = document.getElementById("save-coordinates-button");
 const coordinateStatus = document.getElementById("coordinate-status");
@@ -344,8 +348,28 @@ function setCoordinateStatus(message, isError = false) {
 }
 
 function displayCoordinates(coordinates) {
-    latitudeInput.value = Number(coordinates.lat).toFixed(6);
-    longitudeInput.value = Number(coordinates.lon).toFixed(6);
+    // Device geolocation only supplies lat/lon. Do not erase receiver and
+    // adsb.lol settings when applying that partial update to the form.
+    if (coordinates.lat !== undefined) {
+        latitudeInput.value = Number(coordinates.lat).toFixed(6);
+    }
+    if (coordinates.lon !== undefined) {
+        longitudeInput.value = Number(coordinates.lon).toFixed(6);
+    }
+    if (coordinates.local_receiver_enabled !== undefined) {
+        localReceiverInput.checked = Boolean(
+            coordinates.local_receiver_enabled
+        );
+    }
+    if (coordinates.receiver_address !== undefined) {
+        receiverAddressInput.value = coordinates.receiver_address;
+    }
+    if (coordinates.receiver_beast_port !== undefined) {
+        receiverBeastPortInput.value = coordinates.receiver_beast_port;
+    }
+    if (coordinates.adsblol_enabled !== undefined) {
+        adsblolInput.checked = Boolean(coordinates.adsblol_enabled);
+    }
 }
 
 async function loadCoordinates() {
@@ -368,7 +392,7 @@ async function openCoordinateDialog() {
     try {
         await loadCoordinates();
         setCoordinateStatus(
-            "Enter coordinates manually or use this device's location."
+            "Source toggles save immediately. Apply other settings below."
         );
         latitudeInput.focus();
         latitudeInput.select();
@@ -443,7 +467,11 @@ async function saveCoordinates(event) {
             },
             body: JSON.stringify({
                 lat: Number(latitudeInput.value),
-                lon: Number(longitudeInput.value)
+                lon: Number(longitudeInput.value),
+                local_receiver_enabled: localReceiverInput.checked,
+                receiver_address: receiverAddressInput.value.trim(),
+                receiver_beast_port: Number(receiverBeastPortInput.value),
+                adsblol_enabled: adsblolInput.checked
             })
         });
         const result = await response.json();
@@ -469,10 +497,67 @@ async function saveCoordinates(event) {
     }
 }
 
+async function saveSourceToggle(input, settingName, label) {
+    const enabled = input.checked;
+    const payload = { [settingName]: enabled };
+    const latitude = latitudeInput.valueAsNumber;
+    const longitude = longitudeInput.valueAsNumber;
+
+    // Include the displayed center for compatibility with a Flask process
+    // that has not reloaded the partial-settings endpoint yet.
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        payload.lat = latitude;
+        payload.lon = longitude;
+    }
+
+    input.disabled = true;
+    setCoordinateStatus(`Saving ${label} setting...`);
+
+    try {
+        const response = await fetch(coordinateSettingsUrl, {
+            method: "PATCH",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+
+        if (!response.ok) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+        }
+
+        displayCoordinates(result);
+        setCoordinateStatus(
+            `${label} ${enabled ? "enabled" : "disabled"}.`
+        );
+    } catch (error) {
+        console.error(`Could not save ${label} setting:`, error);
+        try {
+            await loadCoordinates();
+        } catch (loadError) {
+            console.error("Could not restore saved settings:", loadError);
+        }
+        setCoordinateStatus(error.message, true);
+    } finally {
+        input.disabled = false;
+    }
+}
+
 coordinateButton.addEventListener("click", openCoordinateDialog);
 coordinateClose.addEventListener("click", closeCoordinateDialog);
 deviceLocationButton.addEventListener("click", useDeviceLocation);
 coordinateForm.addEventListener("submit", saveCoordinates);
+localReceiverInput.addEventListener("change", () => {
+    saveSourceToggle(
+        localReceiverInput,
+        "local_receiver_enabled",
+        "Local receiver"
+    );
+});
+adsblolInput.addEventListener("change", () => {
+    saveSourceToggle(adsblolInput, "adsblol_enabled", "adsb.lol");
+});
 coordinateDialog.addEventListener("close", () => {
     coordinateButton.classList.remove("is-active");
     setCoordinateStatus("");
@@ -893,16 +978,16 @@ function aircraftMarkerSize() {
     const zoom = map.getZoom();
 
     return zoom <= 7
-        ? 16
+        ? 13
         : zoom === 8
-            ? 20
+            ? 16
             : zoom === 9
-                ? 24
+                ? 19
                 : zoom === 10
-                    ? 28
+                    ? 22
                     : zoom === 11
-                        ? 34
-                        : 40;
+                        ? 26
+                        : 30;
 }
 
 function degreesToRadians(value) {
@@ -1115,6 +1200,18 @@ function aircraftMapIcon(aircraft) {
     const selectedClass = aircraft.hex === primaryAircraftHex
         ? " is-selected"
         : "";
+    const isHelicopter = aircraft.category === "Rotorcraft/Helicopter";
+    const aircraftGlyph = isHelicopter
+        ? '<svg class="aircraft-map-icon helicopter-map-icon" ' +
+          'viewBox="0 0 32 32" aria-hidden="true" focusable="false">' +
+          '<path class="helicopter-main-rotor" d="M1 10.8h13.8V2h2.4v8.8H31v2.4H17.2v9.1h-2.4v-9.1H1Z"></path>' +
+          '<path class="helicopter-body" d="M16 3.2c-2.7 0-4.4 3.1-4.9 7.4l-.5 5.2c-.2 2.5 1.3 4.5 3.6 5.4l.5 5.8h-3v2.2h8.6V27h-3l.5-5.8c2.3-.9 3.8-2.9 3.6-5.4l-.5-5.2c-.5-4.3-2.2-7.4-4.9-7.4Z"></path>' +
+          '<path class="helicopter-tailplane" d="M10.7 24.9h10.6v2.2H10.7Z"></path>' +
+          "</svg>"
+        : '<svg class="aircraft-map-icon" viewBox="0 0 32 32" ' +
+          'aria-hidden="true" focusable="false">' +
+          '<path d="M16 1.4c-1.15 0-1.72 1.12-1.9 2.8l-.86 7.63-9.92 5.54c-.82.46-1.16 1.22-.92 2.13l.5 1.9 10.03-2.77-.68 7.05-3.84 2.85.31 1.62L16 28.71l7.28 1.44.31-1.62-3.84-2.85-.68-7.05L29.1 21.4l.5-1.9c.24-.91-.1-1.67-.92-2.13l-9.92-5.54-.86-7.63c-.18-1.68-.75-2.8-1.9-2.8Z"></path>' +
+          "</svg>";
 
     return L.divIcon({
         className: `aircraft-map-marker${selectedClass}`,
@@ -1123,10 +1220,7 @@ function aircraftMapIcon(aircraft) {
             `style="--marker-size:${markerSize}px;` +
             `--aircraft-rotation:${rotation}deg">` +
             '<span class="aircraft-map-shape">' +
-            '<svg class="aircraft-map-icon" viewBox="0 0 32 32" ' +
-            'aria-hidden="true" focusable="false">' +
-            '<path d="M16 1.4c-1.15 0-1.72 1.12-1.9 2.8l-.86 7.63-9.92 5.54c-.82.46-1.16 1.22-.92 2.13l.5 1.9 10.03-2.77-.68 7.05-3.84 2.85.31 1.62L16 28.71l7.28 1.44.31-1.62-3.84-2.85-.68-7.05L29.1 21.4l.5-1.9c.24-.91-.1-1.67-.92-2.13l-9.92-5.54-.86-7.63c-.18-1.68-.75-2.8-1.9-2.8Z"></path>' +
-            '</svg>' +
+            aircraftGlyph +
             "</span>" +
             `<span class="aircraft-map-type">${typeLabel}</span>` +
             "</div>",
