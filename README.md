@@ -178,9 +178,20 @@ enabling offline mode stops the relay. Integration is off by default.
 
 Aircraft observations remain live at one-second cadence. Trail samples are
 recorded at most every five seconds, retained for one hour, pruned in batches,
-and limited to 360 returned points. Route work uses two background workers and
-a bounded queue. Successful and unavailable routes are cached by normalized
+and limited to 360 returned points. The selected aircraft's bounded detail and
+trail request runs every seven seconds, pauses while the page is hidden, and is
+independent of route status. Route work uses two background workers and a
+bounded queue. Successful and unavailable routes are cached by normalized
 callsign; transient failures back off instead of retrying on every detail poll.
+Queued route work is invalidated when offline mode or route enrichment is
+disabled. An HTTP request already in progress may finish within its 15-second
+timeout, but a fallback provider is not started after permission is revoked.
+
+Malformed, expired, missing, or non-positive adsb.lol `Retry-After` values use
+a 60-second minimum delay. HTTP dates are converted with the wall clock before
+the duration is scheduled against the monotonic clock. Remote and local polling
+currently share one collector thread, so a slow remote request can still delay
+local collection for up to the remote request's 15-second timeout.
 
 `GET /api/diagnostics` reports current aircraft/trail/cache sizes, external
 request outcomes, and route queue/cache/backoff counts. The browser prints one

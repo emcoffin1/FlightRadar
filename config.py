@@ -19,6 +19,10 @@ RUNTIME_DIR = APP_DIR / ".runtime"
 AIRCRAFT_REFRESH_SECONDS = 1
 LOCAL_RECEIVER_POLL_SECONDS = 1
 ADSB_LOL_POLL_SECONDS = 10
+# Invalid or expired Retry-After guidance must never create a tight loop.
+REMOTE_RETRY_MIN_SECONDS = 60
+# Selected-aircraft trails/details are intentionally slower than snapshots.
+AIRCRAFT_DETAIL_REFRESH_SECONDS = 7
 DEFAULT_LAT = 33.512561467820056
 DEFAULT_LON = -117.11927031211901
 DEFAULT_SEARCH_RANGE = 25

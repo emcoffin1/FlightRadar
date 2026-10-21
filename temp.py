@@ -22,9 +22,11 @@ from config import (
     POSITION_CHANGE_EPSILON,
     POSITION_RECORD_MIN_SECONDS,
     RUNTIME_DIR,
+    REMOTE_RETRY_MIN_SECONDS,
     STALE_PASS_LIMIT,
 )
 from local_receiver import ADSBLolFeeder, LocalReceiver
+from retry_after import retry_after_seconds
 
 
 LOGGER = logging.getLogger("adsb_display.collector")
@@ -379,8 +381,23 @@ def merge_aircraft(remote_aircraft, local_aircraft):
     return list(merged.values())
 
 
-def run_collector(adsb_client=None):
+def run_collector(
+    adsb_client=None,
+    *,
+    max_iterations=None,
+    monotonic_clock=None,
+    wall_clock=None,
+    sleeper=None,
+):
+    """Collect local and optional remote snapshots until stopped.
+
+    Injectable clocks and an iteration bound keep retry scheduling testable
+    without real sleeps.  Production callers use the standard clocks.
+    """
     adsb = adsb_client or ADSB_LOL()
+    monotonic_clock = monotonic if monotonic_clock is None else monotonic_clock
+    wall_clock = time if wall_clock is None else wall_clock
+    sleeper = sleep if sleeper is None else sleeper
     local_receiver = LocalReceiver()
     feeder = ADSBLolFeeder(RUNTIME_DIR)
     atexit.register(feeder.stop)
@@ -390,6 +407,7 @@ def run_collector(adsb_client=None):
     remote_due = 0
     previous_remote_settings = None
     local_failures = 0
+    iterations = 0
 
     while True:
         (
@@ -445,7 +463,7 @@ def run_collector(adsb_client=None):
             local_aircraft = []
             local_failures = 0
 
-        now = monotonic()
+        now = monotonic_clock()
         if offline_mode_enabled or not remote_aircraft_enabled:
             remote_aircraft = []
             remote_due = 0
@@ -455,9 +473,16 @@ def run_collector(adsb_client=None):
                 remote_aircraft = adsb.GET_point(range=MAX_COLLECTION_RANGE)
             except requests.exceptions.HTTPError as error:
                 if error.response is not None and error.response.status_code == 429:
-                    retry_after = int(error.response.headers.get("Retry-After", 60))
-                    remote_due = now + max(retry_after, ADSB_LOL_POLL_SECONDS)
-                    LOGGER.warning("Rate limited by adsb.lol for %s seconds", retry_after)
+                    retry_after = retry_after_seconds(error, now=wall_clock())
+                    retry_delay = max(
+                        REMOTE_RETRY_MIN_SECONDS,
+                        retry_after or 0,
+                    )
+                    remote_due = now + retry_delay
+                    LOGGER.warning(
+                        "Rate limited by adsb.lol; retrying in %s seconds",
+                        retry_delay,
+                    )
                 else:
                     LOGGER.warning("adsb.lol HTTP error: %s", error)
             except requests.exceptions.RequestException as error:
@@ -475,7 +500,10 @@ def run_collector(adsb_client=None):
             len(data), len(local_aircraft), len(remote_aircraft), display_range,
             center_lat, center_lon,
         )
-        sleep(LOCAL_RECEIVER_POLL_SECONDS)
+        iterations += 1
+        if max_iterations is not None and iterations >= max_iterations:
+            return
+        sleeper(LOCAL_RECEIVER_POLL_SECONDS)
 
 
 if __name__ == "__main__":

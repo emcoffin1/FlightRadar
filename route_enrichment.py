@@ -1,13 +1,13 @@
 """Bounded, non-blocking route enrichment keyed by normalized callsign."""
 
 from concurrent.futures import ThreadPoolExecutor
-from email.utils import parsedate_to_datetime
 import logging
 from threading import Lock
 import time
 
 import requests
 
+from adsblol import ExternalLookupDisabled
 from config import (
     DATABASE_PATH,
     ROUTE_LOOKUP_MAX_PENDING,
@@ -16,6 +16,7 @@ from config import (
     ROUTE_RETRY_MIN_SECONDS,
 )
 from database import connect_database, ensure_aircraft_schema
+from retry_after import retry_after_seconds
 
 
 LOGGER = logging.getLogger("adsb_display.routes")
@@ -32,24 +33,6 @@ ROUTE_FIELDS = (
 def normalize_callsign(value):
     callsign = str(value or "").strip().upper()
     return "" if callsign in {"", "NA", "N/A"} else callsign
-
-
-def retry_after_seconds(error, now=None):
-    """Return valid Retry-After guidance from an HTTP error, if present."""
-    response = getattr(error, "response", None)
-    value = response.headers.get("Retry-After") if response is not None else None
-    if not value:
-        return None
-    try:
-        seconds = int(value)
-        return max(0, seconds)
-    except (TypeError, ValueError):
-        pass
-    try:
-        current = time.time() if now is None else now
-        return max(0, int(parsedate_to_datetime(value).timestamp() - current))
-    except (TypeError, ValueError, OverflowError):
-        return None
 
 
 class RouteLookupCoordinator:
@@ -72,6 +55,8 @@ class RouteLookupCoordinator:
         )
         self.lock = Lock()
         self.in_flight = set()
+        self.external_enabled = True
+        self.permission_generation = 0
         self.counts = {
             "queued": 0,
             "completed": 0,
@@ -156,14 +141,37 @@ class RouteLookupCoordinator:
                     AND callsign = ?
             """, (*values, aircraft_hex, callsign))
 
-    def _run(self, callsign, aircraft_hex):
+    def set_external_enabled(self, enabled):
+        """Atomically update permission and invalidate already queued work."""
+        enabled = bool(enabled)
+        with self.lock:
+            if enabled != self.external_enabled:
+                self.external_enabled = enabled
+                self.permission_generation += 1
+
+    def is_external_enabled(self):
+        with self.lock:
+            return self.external_enabled
+
+    def _run(self, callsign, aircraft_hex, permission_generation):
         try:
+            with self.lock:
+                permitted = (
+                    self.external_enabled
+                    and permission_generation == self.permission_generation
+                )
+            if not permitted:
+                return
             route = self.lookup(callsign, aircraft_hex)
             self._store_complete(callsign, route)
             self._apply_to_aircraft(callsign, aircraft_hex, route)
             unavailable = route.get("departure") in {None, "NA", "N/A"}
             with self.lock:
                 self.counts["unavailable" if unavailable else "completed"] += 1
+        except ExternalLookupDisabled:
+            # Permission cancellation is neither a provider failure nor an
+            # unavailable route, so it must not affect cache/backoff state.
+            pass
         except requests.exceptions.RequestException as error:
             retry_at = self._store_failure(callsign, error)
             with self.lock:
@@ -220,6 +228,8 @@ class RouteLookupCoordinator:
             return {"status": "disabled"}
 
         with self.lock:
+            if not self.external_enabled:
+                return {"status": "disabled"}
             if callsign in self.in_flight:
                 return {"status": "loading"}
             if len(self.in_flight) >= self.max_pending:
@@ -227,8 +237,14 @@ class RouteLookupCoordinator:
                 return {"status": "busy"}
             self.in_flight.add(callsign)
             self.counts["queued"] += 1
+            permission_generation = self.permission_generation
 
-        self.executor.submit(self._run, callsign, aircraft_hex)
+        self.executor.submit(
+            self._run,
+            callsign,
+            aircraft_hex,
+            permission_generation,
+        )
         return {"status": "loading"}
 
     def diagnostics(self):

@@ -240,6 +240,11 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertIn('inputmode="decimal"', page)
         self.assertNotIn('name="lat"\n                            type="number"', page)
         self.assertIn("aircraftRefreshMs: 1000", page)
+        self.assertIn("aircraftDetailRefreshMs: 7000", page)
+        self.assertLess(
+            page.index("detail_scheduler.js"),
+            page.index("dashboard.js"),
+        )
 
 
 class AircraftMetadataTests(unittest.TestCase):

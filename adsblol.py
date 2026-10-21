@@ -48,6 +48,10 @@ CATEGORY_NAMES = {
 }
 
 
+class ExternalLookupDisabled(Exception):
+    """Raised when route-network permission is revoked between providers."""
+
+
 def decode_flags(db_flags: int) -> list:
     return [
         name for bit, name in DB_FLAG_NAMES.items()
@@ -305,7 +309,7 @@ class ADSB_LOL:
         return new_data
 
 
-    def GET_flight_info(self, callsign, hex):
+    def GET_flight_info(self, callsign, hex, permission_check=None):
         """Look up and return route codes for one selected aircraft."""
         unavailable = {
             'airline': 'NA',
@@ -319,6 +323,9 @@ class ADSB_LOL:
         callsign = str(callsign or '').strip().upper()
         if not callsign or callsign in {'NA', 'N/A'}:
             return unavailable
+
+        if permission_check is not None and not permission_check():
+            raise ExternalLookupDisabled()
 
         # ADSBDB accepts either an ICAO or IATA callsign and includes the
         # airline plus both IATA and ICAO airport codes in a successful route.
@@ -361,6 +368,8 @@ class ADSB_LOL:
 
         # HexDB's route lookup expects the ICAO-style callsign broadcast by
         # ADS-B (AAL123, SWA456, etc.), not an IATA flight number.
+        if permission_check is not None and not permission_check():
+            raise ExternalLookupDisabled()
         url = f"https://hexdb.io/api/v1/route/icao/{callsign}"
         response = self._external_get("hexdb", url, timeout=15)
 

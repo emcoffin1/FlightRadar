@@ -1,6 +1,8 @@
 import math
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 from threading import Event
 import time
@@ -10,8 +12,8 @@ from unittest.mock import Mock, patch
 import requests
 
 import app as web_app
-from adsblol import ADSB_LOL
-from config import HISTORY_MAX_POINTS
+from adsblol import ADSB_LOL, ExternalLookupDisabled
+from config import HISTORY_MAX_POINTS, REMOTE_RETRY_MIN_SECONDS
 from database import connect_database, ensure_aircraft_schema, ensure_mode_settings
 from route_enrichment import RouteLookupCoordinator, retry_after_seconds
 import temp as collector
@@ -91,6 +93,47 @@ class DatabaseLifecycleTests(unittest.TestCase):
 
 
 class NetworkSettingsTests(unittest.TestCase):
+    def test_coordinate_updates_notify_route_permission_coordinator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.db"
+            with connect_database(path) as conn:
+                ensure_mode_settings(conn)
+
+            def isolated_connection(*, rows=False):
+                return connect_database(path, rows=rows)
+
+            with (
+                patch.object(web_app, "connect_database", isolated_connection),
+                patch.object(
+                    web_app.route_coordinator,
+                    "set_external_enabled",
+                ) as update_permission,
+            ):
+                client = web_app.app.test_client()
+                self.assertEqual(client.patch(
+                    "/api/settings/coordinates",
+                    json={
+                        "route_enrichment_enabled": True,
+                        "offline_mode_enabled": False,
+                    },
+                ).status_code, 200)
+                self.assertEqual(client.patch(
+                    "/api/settings/coordinates",
+                    json={"offline_mode_enabled": True},
+                ).status_code, 200)
+                self.assertEqual(client.patch(
+                    "/api/settings/coordinates",
+                    json={
+                        "offline_mode_enabled": False,
+                        "route_enrichment_enabled": False,
+                    },
+                ).status_code, 200)
+
+        self.assertEqual(
+            [call.args[0] for call in update_permission.call_args_list],
+            [True, False, False],
+        )
+
     def test_old_combined_setting_migrates_without_enabling_new_services(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "migration.db"
@@ -275,6 +318,80 @@ class RouteCoordinatorTests(unittest.TestCase):
                 coordinator.shutdown()
         self.assertFalse(row["route_lookup_complete"])
 
+    def check_queued_lookup_is_invalidated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.db"
+            prepare_database(path)
+            first_started = Event()
+            release_first = Event()
+            calls = []
+
+            def lookup(callsign, _aircraft_hex):
+                calls.append(callsign)
+                if callsign == "FIRST1":
+                    first_started.set()
+                    release_first.wait()
+                return KNOWN_ROUTE
+
+            coordinator = self.make_coordinator(path, lookup)
+            try:
+                coordinator.get_or_enqueue("FIRST1", "abc123", True)
+                self.assertTrue(first_started.wait(1))
+                coordinator.get_or_enqueue("SECOND2", "def456", True)
+                coordinator.set_external_enabled(False)
+                release_first.set()
+                wait_for(lambda: coordinator.diagnostics()["in_flight"] == 0)
+                self.assertEqual(calls, ["FIRST1"])
+                self.assertIsNone(coordinator._cache("SECOND2"))
+
+                coordinator.set_external_enabled(True)
+                coordinator.get_or_enqueue("SECOND2", "def456", True)
+                wait_for(lambda: coordinator.diagnostics()["in_flight"] == 0)
+                self.assertEqual(calls, ["FIRST1", "SECOND2"])
+            finally:
+                release_first.set()
+                coordinator.shutdown()
+
+    def test_offline_mode_invalidates_queued_lookup(self):
+        self.check_queued_lookup_is_invalidated()
+
+    def test_disabling_route_enrichment_invalidates_queued_lookup(self):
+        self.check_queued_lookup_is_invalidated()
+
+    def test_cached_route_remains_available_while_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.db"
+            prepare_database(path)
+            lookup = Mock(return_value=KNOWN_ROUTE)
+            coordinator = self.make_coordinator(path, lookup)
+            try:
+                coordinator.get_or_enqueue("EXA123", "abc123", True)
+                wait_for(lambda: coordinator.diagnostics()["in_flight"] == 0)
+                coordinator.set_external_enabled(False)
+                state = coordinator.get_or_enqueue("EXA123", "abc123", False)
+            finally:
+                coordinator.shutdown()
+        self.assertEqual(state["status"], "ready")
+        self.assertEqual(lookup.call_count, 1)
+
+    def test_permission_revocation_prevents_fallback_provider(self):
+        adsb = ADSB_LOL()
+        permission = [True]
+        not_found = Mock(status_code=404)
+
+        def external_get(*_args, **_kwargs):
+            permission[0] = False
+            return not_found
+
+        adsb._external_get = Mock(side_effect=external_get)
+        with self.assertRaises(ExternalLookupDisabled):
+            adsb.GET_flight_info(
+                "EXA123",
+                "abc123",
+                permission_check=lambda: permission[0],
+            )
+        self.assertEqual(adsb._external_get.call_count, 1)
+
 
 class CollectorAndHistoryTests(unittest.TestCase):
     @staticmethod
@@ -377,6 +494,115 @@ class CollectorAndHistoryTests(unittest.TestCase):
         self.assertEqual(len(fake_database.updated), 1)
         self.assertEqual(fake_database.updated[0]["hex"], "abc123")
 
+    def test_rate_limit_headers_defer_remote_and_preserve_local_iterations(self):
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+
+        wall_now = 1_800_000_000
+        cases = {
+            "integer": "120",
+            "http-date": format_datetime(
+                datetime.fromtimestamp(wall_now + 120, timezone.utc),
+                usegmt=True,
+            ),
+            "missing": None,
+            "malformed": "not-a-delay",
+            "empty": "",
+            "negative": "-5",
+            "expired": format_datetime(
+                datetime.fromtimestamp(wall_now - 120, timezone.utc),
+                usegmt=True,
+            ),
+        }
+
+        for label, header in cases.items():
+            with self.subTest(label=label):
+                updates = []
+
+                class FakeDatabase:
+                    def get_collection_settings(self):
+                        return (True, True, 50, 33.5, -117.1, True, "local",
+                                30005, False, True, False)
+
+                    def enrich_local_aircraft(self, payload):
+                        return payload
+
+                    def update_ac(self, data):
+                        updates.append(data)
+
+                response = requests.Response()
+                response.status_code = 429
+                if header is not None:
+                    response.headers["Retry-After"] = header
+                limited = requests.HTTPError("limited", response=response)
+                adsb = ADSB_LOL(lat=33.5, lon=-117.1)
+                adsb.GET_point = Mock(side_effect=limited)
+                monotonic_now = [100.0]
+
+                def advance(seconds):
+                    monotonic_now[0] += seconds
+
+                with (
+                    patch.object(collector, "Database", return_value=FakeDatabase()),
+                    patch.object(
+                        collector.LocalReceiver,
+                        "get_aircraft",
+                        return_value={"ac": [self.aircraft()]},
+                    ),
+                    patch.object(collector.ADSBLolFeeder, "sync"),
+                ):
+                    collector.run_collector(
+                        adsb,
+                        max_iterations=4,
+                        monotonic_clock=lambda: monotonic_now[0],
+                        wall_clock=lambda: wall_now,
+                        sleeper=advance,
+                    )
+
+                self.assertEqual(adsb.GET_point.call_count, 1)
+                self.assertEqual(len(updates), 4)
+                self.assertTrue(all(len(snapshot) == 1 for snapshot in updates))
+
+    def test_rate_limit_retries_only_at_monotonic_deadline(self):
+        class FakeDatabase:
+            def get_collection_settings(self):
+                return (True, True, 50, 33.5, -117.1, True, "local", 30005,
+                        False, True, False)
+
+            def enrich_local_aircraft(self, payload):
+                return payload
+
+            def update_ac(self, _data):
+                pass
+
+        response = requests.Response()
+        response.status_code = 429
+        response.headers["Retry-After"] = "invalid"
+        adsb = ADSB_LOL(lat=33.5, lon=-117.1)
+        adsb.GET_point = Mock(
+            side_effect=requests.HTTPError("limited", response=response)
+        )
+        monotonic_now = [100.0]
+        with (
+            patch.object(collector, "Database", return_value=FakeDatabase()),
+            patch.object(
+                collector.LocalReceiver,
+                "get_aircraft",
+                return_value={"ac": [self.aircraft()]},
+            ),
+            patch.object(collector.ADSBLolFeeder, "sync"),
+        ):
+            collector.run_collector(
+                adsb,
+                max_iterations=REMOTE_RETRY_MIN_SECONDS + 1,
+                monotonic_clock=lambda: monotonic_now[0],
+                wall_clock=lambda: 1_800_000_000,
+                sleeper=lambda seconds: monotonic_now.__setitem__(
+                    0, monotonic_now[0] + seconds
+                ),
+            )
+        self.assertEqual(adsb.GET_point.call_count, 2)
+
     def test_upload_alone_does_not_enable_remote_polling(self):
         class FakeDatabase:
             def get_collection_settings(self):
@@ -444,6 +670,18 @@ class CollectorAndHistoryTests(unittest.TestCase):
 
 
 class FrontendRegressionTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("gjs"), "gjs JavaScript runtime unavailable")
+    def test_detail_scheduler_behavior(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["gjs", "-m", str(root / "tests" / "detail_scheduler_test.js")],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_constrained_profile_and_keyed_updates_are_present(self):
         root = Path(__file__).resolve().parents[1]
         javascript = (root / "static" / "dashboard.js").read_text()

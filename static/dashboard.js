@@ -773,8 +773,6 @@ let aircraftRefreshInFlight = false;
 let primaryPathHex = null;
 let primaryPathSignature = "";
 let primaryDetailHex = null;
-let detailAbortController = null;
-let detailRefreshTimer = null;
 
 function clearPrimaryAircraftPath() {
     primaryPathOutline.setLatLngs([]);
@@ -826,12 +824,7 @@ function clearPrimaryAircraft() {
     clearPrimaryAircraftPath();
     setRouteAirportHighlights(null);
     primaryDetailHex = null;
-    if (detailAbortController) {
-        detailAbortController.abort();
-        detailAbortController = null;
-    }
-    window.clearTimeout(detailRefreshTimer);
-    detailRefreshTimer = null;
+    detailScheduler.clear();
 }
 
 function displayAircraftImage(aircraft) {
@@ -1656,40 +1649,39 @@ function returnToNearestAfterMissing(missingHex) {
     loadPrimaryAircraft(primaryAircraftHex);
 }
 
-async function loadPrimaryAircraft(aircraftHex) {
-    const requestNumber = ++primaryRequestNumber;
+function loadPrimaryAircraft(aircraftHex) {
     const basicAircraft = visibleAircraft.find(
         (item) => item.hex === aircraftHex
     );
     const selectionChanged = primaryDetailHex !== aircraftHex;
-
-    if (selectionChanged && detailAbortController) {
-        detailAbortController.abort();
-    }
-    window.clearTimeout(detailRefreshTimer);
-    detailRefreshTimer = null;
     primaryDetailHex = aircraftHex;
 
     if (selectionChanged) {
         clearPrimaryAircraftPath();
         setRouteAirportHighlights(null);
+        displayPrimaryAircraft(basicAircraft, true, true);
     }
 
-    // Preserve known airport/route details during the routine one-second
-    // position refresh. Show the loading state only for a new aircraft.
-    displayPrimaryAircraft(
-        basicAircraft,
-        selectionChanged,
-        selectionChanged
+    detailScheduler.select(
+        aircraftHex,
+        basicAircraft ? basicAircraft.callsign : ""
     );
+}
 
-    const controller = new AbortController();
-    detailAbortController = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 8000);
+async function fetchPrimaryAircraftDetail(
+    aircraftHex,
+    scheduledCallsign,
+    generation,
+    signal
+) {
+    const requestNumber = ++primaryRequestNumber;
+    const basicAircraft = visibleAircraft.find(
+        (item) => item.hex === aircraftHex
+    );
 
     try {
         const response = await fetch(aircraftDetailUrl(aircraftHex), {
-            signal: controller.signal
+            signal
         });
 
         if (response.status === 404) {
@@ -1706,53 +1698,38 @@ async function loadPrimaryAircraft(aircraftHex) {
 
         if (
             requestNumber === primaryRequestNumber &&
-            aircraft.hex === primaryAircraftHex
+            aircraft.hex === primaryAircraftHex &&
+            detailScheduler.isCurrent(aircraftHex, generation)
         ) {
             displayPrimaryAircraft(aircraft);
             displayPrimaryAircraftPath(aircraft);
             setRouteAirportHighlights(aircraft);
-
-            if (["loading", "busy", "retrying"].includes(
-                aircraft.route_status
-            )) {
-                const retryDelay = aircraft.route_status === "retrying"
-                    ? Math.max(
-                        5000,
-                        Math.min(
-                            60000,
-                            Number(aircraft.route_retry_after) * 1000 - Date.now()
-                        )
-                    )
-                    : 5000;
-                detailRefreshTimer = window.setTimeout(() => {
-                    if (
-                        aircraftHex === primaryAircraftHex &&
-                        !document.hidden
-                    ) {
-                        loadPrimaryAircraft(aircraftHex);
-                    }
-                }, retryDelay);
-            }
         }
     } catch (error) {
         if (error.name !== "AbortError") {
             console.error("Could not retrieve selected aircraft:", error);
         }
 
-        if (error.name !== "AbortError" && requestNumber === primaryRequestNumber) {
+        if (
+            error.name !== "AbortError" &&
+            requestNumber === primaryRequestNumber &&
+            detailScheduler.isCurrent(aircraftHex, generation)
+        ) {
             if (error.aircraftMissing) {
                 returnToNearestAfterMissing(aircraftHex);
             } else {
                 displayPrimaryAircraft(basicAircraft);
             }
         }
-    } finally {
-        window.clearTimeout(timeout);
-        if (detailAbortController === controller) {
-            detailAbortController = null;
-        }
     }
 }
+
+const detailScheduler = new AircraftDetailScheduler({
+    intervalMs: Number(config.aircraftDetailRefreshMs) || 7000,
+    requestTimeoutMs: 8000,
+    hidden: document.hidden,
+    poll: fetchPrimaryAircraftDetail
+});
 
 function selectAircraft(aircraftHex, manual = true) {
     const aircraftExists = visibleAircraft.some(
@@ -1833,9 +1810,9 @@ async function updateAircraftDisplay() {
             (item) => item.hex === primaryAircraftHex
         );
         displayPrimaryAircraft(basicAircraft, false, false);
-        if (primaryDetailHex !== primaryAircraftHex) {
-            loadPrimaryAircraft(primaryAircraftHex);
-        }
+        // This is cheap when the selection/callsign is unchanged. The detail
+        // scheduler owns the bounded trail cadence and prevents overlap.
+        loadPrimaryAircraft(primaryAircraftHex);
     } catch (error) {
         if (error.name !== "AbortError") {
             console.error("Could not retrieve aircraft list:", error);
@@ -1873,11 +1850,9 @@ function recordFrontendUpdate(durationMs) {
 }
 
 document.addEventListener("visibilitychange", () => {
+    detailScheduler.setVisible(!document.hidden);
     if (!document.hidden) {
         updateAircraftDisplay();
-        if (primaryAircraftHex) {
-            loadPrimaryAircraft(primaryAircraftHex);
-        }
         ensureAnimationLoop();
     }
 });

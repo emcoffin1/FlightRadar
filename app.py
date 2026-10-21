@@ -47,6 +47,7 @@ from database import (
 from local_receiver import receiver_json_location
 from route_enrichment import RouteLookupCoordinator
 from config import (
+    AIRCRAFT_DETAIL_REFRESH_SECONDS,
     AIRCRAFT_REFRESH_SECONDS,
     AIRPORT_DATA_PATH,
     MAX_TILE_RADIUS_NM,
@@ -66,7 +67,18 @@ LOGGER = logging.getLogger("adsb_display")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 adsb_client = ADSB_LOL()
-route_coordinator = RouteLookupCoordinator(adsb_client.GET_flight_info)
+route_coordinator = None
+
+
+def lookup_aircraft_route(callsign, aircraft_hex):
+    return adsb_client.GET_flight_info(
+        callsign,
+        aircraft_hex,
+        permission_check=route_coordinator.is_external_enabled,
+    )
+
+
+route_coordinator = RouteLookupCoordinator(lookup_aircraft_route)
 collector_thread = None
 airport_data_lock = Lock()
 external_request_counts = Counter()
@@ -713,6 +725,9 @@ def hello_world():
     return render_template(
         "index.html",
         aircraft_refresh_ms=int(AIRCRAFT_REFRESH_SECONDS * 1000),
+        aircraft_detail_refresh_ms=int(
+            AIRCRAFT_DETAIL_REFRESH_SECONDS * 1000
+        ),
         map_center=[
             float(coordinates["center_lat"]),
             float(coordinates["center_lon"]),
@@ -1095,6 +1110,10 @@ def coordinate_settings():
             WHERE id = 1
         """).fetchone()
 
+    route_coordinator.set_external_enabled(
+        bool(coordinates["route_enrichment_enabled"])
+        and not bool(coordinates["offline_mode_enabled"])
+    )
     return jsonify(serialize_coordinates(coordinates))
 
 
@@ -1152,6 +1171,16 @@ def initialize_application_database():
 
 
 initialize_application_database()
+with connect_database(rows=True) as conn:
+    initial_network_settings = conn.execute("""
+        SELECT route_enrichment_enabled, offline_mode_enabled
+        FROM app_settings
+        WHERE id = 1
+    """).fetchone()
+route_coordinator.set_external_enabled(
+    bool(initial_network_settings["route_enrichment_enabled"])
+    and not bool(initial_network_settings["offline_mode_enabled"])
+)
 
 
 if __name__ == "__main__":
