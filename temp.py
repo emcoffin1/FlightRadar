@@ -14,9 +14,13 @@ from database import (
 from config import (
     ADSB_LOL_POLL_SECONDS,
     DATABASE_PATH,
+    HISTORY_MAX_AGE_SECONDS,
+    HISTORY_MAX_POINTS,
+    HISTORY_PRUNE_INTERVAL_SECONDS,
     LOCAL_RECEIVER_POLL_SECONDS,
     MAX_COLLECTION_RANGE,
     POSITION_CHANGE_EPSILON,
+    POSITION_RECORD_MIN_SECONDS,
     RUNTIME_DIR,
     STALE_PASS_LIMIT,
 )
@@ -28,6 +32,7 @@ LOGGER = logging.getLogger("adsb_display.collector")
 class Database:
     def __init__(self, db_path=DATABASE_PATH):
         self.db_path = db_path
+        self.last_history_prune = 0
         self.create_table()
 
     def connect(self):
@@ -115,7 +120,9 @@ class Database:
                 local_receiver_enabled,
                 receiver_address,
                 receiver_beast_port,
-                adsblol_feed_enabled
+                adsblol_upload_enabled,
+                remote_aircraft_enabled,
+                offline_mode_enabled
             FROM app_settings
             WHERE id = 1
         """)[0]
@@ -130,6 +137,8 @@ class Database:
             str(settings[6]),
             int(settings[7]),
             bool(settings[8]),
+            bool(settings[9]),
+            bool(settings[10]),
         )
 
     def _record_position(self, conn, aircraft_id, aircraft, recorded_at):
@@ -143,7 +152,7 @@ class Database:
             return
 
         previous = conn.execute("""
-            SELECT lat, lon
+            SELECT recorded_at, lat, lon
             FROM aircraft_positions
             WHERE aircraft_id = ?
             ORDER BY id DESC
@@ -151,8 +160,11 @@ class Database:
         """, (aircraft_id,)).fetchone()
 
         if previous is not None and (
-            abs(float(previous[0]) - latitude) < POSITION_CHANGE_EPSILON
-            and abs(float(previous[1]) - longitude) < POSITION_CHANGE_EPSILON
+            recorded_at - float(previous[0]) < POSITION_RECORD_MIN_SECONDS
+            or (
+                abs(float(previous[1]) - latitude) < POSITION_CHANGE_EPSILON
+                and abs(float(previous[2]) - longitude) < POSITION_CHANGE_EPSILON
+            )
         ):
             return
 
@@ -164,6 +176,27 @@ class Database:
                 lon
             ) VALUES (?, ?, ?, ?)
         """, (aircraft_id, recorded_at, latitude, longitude))
+
+    def _prune_history(self, conn, aircraft_ids, recorded_at):
+        if recorded_at - self.last_history_prune < HISTORY_PRUNE_INTERVAL_SECONDS:
+            return
+        self.last_history_prune = recorded_at
+        conn.execute(
+            "DELETE FROM aircraft_positions WHERE recorded_at < ?",
+            (recorded_at - HISTORY_MAX_AGE_SECONDS,),
+        )
+        for aircraft_id in aircraft_ids:
+            conn.execute("""
+                DELETE FROM aircraft_positions
+                WHERE aircraft_id = ?
+                    AND id NOT IN (
+                        SELECT id
+                        FROM aircraft_positions
+                        WHERE aircraft_id = ?
+                        ORDER BY recorded_at DESC
+                        LIMIT ?
+                    )
+            """, (aircraft_id, aircraft_id, HISTORY_MAX_POINTS))
 
     def _age_missing_aircraft(self, conn, current_aircraft_ids):
         if current_aircraft_ids:
@@ -317,6 +350,7 @@ class Database:
                     ) from error
 
             self._age_missing_aircraft(conn, current_aircraft_ids)
+            self._prune_history(conn, current_aircraft_ids, recorded_at)
 
 
 def filter_modes(aircraft, normal_enabled, military_enabled):
@@ -345,8 +379,8 @@ def merge_aircraft(remote_aircraft, local_aircraft):
     return list(merged.values())
 
 
-def run_collector():
-    adsb = ADSB_LOL()
+def run_collector(adsb_client=None):
+    adsb = adsb_client or ADSB_LOL()
     local_receiver = LocalReceiver()
     feeder = ADSBLolFeeder(RUNTIME_DIR)
     atexit.register(feeder.stop)
@@ -367,13 +401,15 @@ def run_collector():
             local_enabled,
             receiver_address,
             receiver_beast_port,
-            adsblol_enabled,
+            adsblol_upload_enabled,
+            remote_aircraft_enabled,
+            offline_mode_enabled,
         ) = db.get_collection_settings()
         adsb.LAT = center_lat
         adsb.LON = center_lon
         adsb.RANGE = MAX_COLLECTION_RANGE
         feeder.sync(
-            local_enabled and adsblol_enabled,
+            local_enabled and adsblol_upload_enabled and not offline_mode_enabled,
             receiver_address,
             receiver_beast_port,
         )
@@ -410,7 +446,7 @@ def run_collector():
             local_failures = 0
 
         now = monotonic()
-        if not adsblol_enabled:
+        if offline_mode_enabled or not remote_aircraft_enabled:
             remote_aircraft = []
             remote_due = 0
         elif now >= remote_due:

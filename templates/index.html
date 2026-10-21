@@ -15,7 +15,7 @@
             href="{{ url_for('static', filename='dashboard.css') }}"
         >
     </head>
-    <body>
+    <body{% if constrained_profile_enabled %} class="constrained-device"{% endif %}>
         <div class="container">
             <aside class="left-panel">
                 <nav class="mode-controls" aria-label="Aircraft feed controls">
@@ -284,6 +284,18 @@
                 </div>
 
                 <div class="receiver-settings">
+                    <label class="dialog-switch" for="offline-mode-enabled">
+                        <input
+                            id="offline-mode-enabled"
+                            name="offline_mode_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>Offline mode</strong>
+                            <small>Block every application-initiated external request</small>
+                        </span>
+                    </label>
+
                     <label class="dialog-switch" for="local-receiver-enabled">
                         <input
                             id="local-receiver-enabled"
@@ -329,15 +341,63 @@
                         /readsb/aircraft.json.
                     </p>
 
-                    <label class="dialog-switch" for="adsblol-enabled">
+                    <label class="dialog-switch" for="adsblol-upload-enabled">
                         <input
-                            id="adsblol-enabled"
-                            name="adsblol_enabled"
+                            id="adsblol-upload-enabled"
+                            name="adsblol_upload_enabled"
                             type="checkbox"
                         >
                         <span>
-                            <strong>Use adsb.lol</strong>
-                            <small>Retrieve public data and feed local Beast data</small>
+                            <strong>Upload to adsb.lol</strong>
+                            <small>Feed local Beast data only</small>
+                        </span>
+                    </label>
+
+                    <label class="dialog-switch" for="remote-aircraft-enabled">
+                        <input
+                            id="remote-aircraft-enabled"
+                            name="remote_aircraft_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>Remote adsb.lol aircraft</strong>
+                            <small>Poll the public point API independently</small>
+                        </span>
+                    </label>
+
+                    <label class="dialog-switch" for="route-enrichment-enabled">
+                        <input
+                            id="route-enrichment-enabled"
+                            name="route_enrichment_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>External route lookup</strong>
+                            <small>Use ADSBDB and HexDB for selected flights</small>
+                        </span>
+                    </label>
+
+                    <label class="dialog-switch" for="external-tiles-enabled">
+                        <input
+                            id="external-tiles-enabled"
+                            name="external_tiles_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>Download map tiles</strong>
+                            <small>Allow cache misses and revalidation through OpenStreetMap</small>
+                        </span>
+                    </label>
+
+                    <label class="dialog-switch" for="constrained-profile-enabled">
+                        <input
+                            id="constrained-profile-enabled"
+                            name="constrained_profile_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>Low-resource kiosk mode</strong>
+                            <small>Disable animation and expensive visual filters</small>
                         </span>
                     </label>
                 </div>
@@ -375,7 +435,8 @@
                 airportsUrl: {{ url_for('get_airports') | tojson }},
                 aircraftDetailUrlTemplate: {{ url_for('get_aircraft', aircraft_hex='__HEX__') | tojson }},
                 modeSettingsUrl: {{ url_for('mode_settings') | tojson }},
-                coordinateSettingsUrl: {{ url_for('coordinate_settings') | tojson }}
+                coordinateSettingsUrl: {{ url_for('coordinate_settings') | tojson }},
+                constrainedProfile: {{ constrained_profile_enabled | tojson }}
             };
         </script>
         <script src="{{ url_for('static', filename='dashboard.js') }}"></script>

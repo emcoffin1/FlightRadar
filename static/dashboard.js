@@ -7,6 +7,7 @@ const airportsUrl = config.airportsUrl;
 const aircraftDetailUrlTemplate = config.aircraftDetailUrlTemplate;
 const modeSettingsUrl = config.modeSettingsUrl;
 const coordinateSettingsUrl = config.coordinateSettingsUrl;
+let constrainedProfile = Boolean(config.constrainedProfile);
 
 const httpErrorIndicator = document.getElementById("http-error-indicator");
 const httpErrorMessage = document.getElementById("http-error-message");
@@ -208,6 +209,7 @@ new RecenterControl().addTo(map);
 const aircraftMarkers = new Map();
 const aircraftMotionStates = new Map();
 const airportMarkers = new Map();
+const aircraftRows = new Map();
 const expectedAircraftUpdateMs = aircraftRefreshMs;
 let nearbyAirports = [];
 let routeAirportCodes = new Set();
@@ -341,7 +343,22 @@ const coordinateKeypadLabel = document.getElementById(
 const localReceiverInput = document.getElementById("local-receiver-enabled");
 const receiverAddressInput = document.getElementById("receiver-address");
 const receiverBeastPortInput = document.getElementById("receiver-beast-port");
-const adsblolInput = document.getElementById("adsblol-enabled");
+const offlineModeInput = document.getElementById("offline-mode-enabled");
+const adsblolUploadInput = document.getElementById(
+    "adsblol-upload-enabled"
+);
+const remoteAircraftInput = document.getElementById(
+    "remote-aircraft-enabled"
+);
+const routeEnrichmentInput = document.getElementById(
+    "route-enrichment-enabled"
+);
+const externalTilesInput = document.getElementById(
+    "external-tiles-enabled"
+);
+const constrainedProfileInput = document.getElementById(
+    "constrained-profile-enabled"
+);
 const deviceLocationButton = document.getElementById("device-location-button");
 const saveCoordinatesButton = document.getElementById("save-coordinates-button");
 const coordinateStatus = document.getElementById("coordinate-status");
@@ -450,8 +467,28 @@ function displayCoordinates(coordinates) {
     if (coordinates.receiver_beast_port !== undefined) {
         receiverBeastPortInput.value = coordinates.receiver_beast_port;
     }
-    if (coordinates.adsblol_enabled !== undefined) {
-        adsblolInput.checked = Boolean(coordinates.adsblol_enabled);
+    const toggleValues = [
+        [offlineModeInput, "offline_mode_enabled"],
+        [adsblolUploadInput, "adsblol_upload_enabled"],
+        [remoteAircraftInput, "remote_aircraft_enabled"],
+        [routeEnrichmentInput, "route_enrichment_enabled"],
+        [externalTilesInput, "external_tiles_enabled"],
+        [constrainedProfileInput, "constrained_profile_enabled"]
+    ];
+    for (const [input, name] of toggleValues) {
+        if (coordinates[name] !== undefined) {
+            input.checked = Boolean(coordinates[name]);
+        }
+    }
+    if (coordinates.constrained_profile_enabled !== undefined) {
+        constrainedProfile = Boolean(
+            coordinates.constrained_profile_enabled
+        );
+        document.body.classList.toggle(
+            "constrained-device",
+            constrainedProfile
+        );
+        ensureAnimationLoop();
     }
 }
 
@@ -569,7 +606,12 @@ async function saveCoordinates(event) {
                 local_receiver_enabled: localReceiverInput.checked,
                 receiver_address: receiverAddressInput.value.trim(),
                 receiver_beast_port: Number(receiverBeastPortInput.value),
-                adsblol_enabled: adsblolInput.checked
+                adsblol_upload_enabled: adsblolUploadInput.checked,
+                remote_aircraft_enabled: remoteAircraftInput.checked,
+                route_enrichment_enabled: routeEnrichmentInput.checked,
+                external_tiles_enabled: externalTilesInput.checked,
+                offline_mode_enabled: offlineModeInput.checked,
+                constrained_profile_enabled: constrainedProfileInput.checked
             })
         });
         const result = await response.json();
@@ -667,9 +709,22 @@ localReceiverInput.addEventListener("change", () => {
         "Local receiver"
     );
 });
-adsblolInput.addEventListener("change", () => {
-    saveSourceToggle(adsblolInput, "adsblol_enabled", "adsb.lol");
-});
+for (const [input, setting, label] of [
+    [offlineModeInput, "offline_mode_enabled", "Offline mode"],
+    [adsblolUploadInput, "adsblol_upload_enabled", "adsb.lol upload"],
+    [remoteAircraftInput, "remote_aircraft_enabled", "Remote aircraft"],
+    [routeEnrichmentInput, "route_enrichment_enabled", "Route lookup"],
+    [externalTilesInput, "external_tiles_enabled", "Map downloads"],
+    [
+        constrainedProfileInput,
+        "constrained_profile_enabled",
+        "Low-resource kiosk mode"
+    ]
+]) {
+    input.addEventListener("change", () => {
+        saveSourceToggle(input, setting, label);
+    });
+}
 coordinateDialog.addEventListener("close", () => {
     coordinateButton.classList.remove("is-active");
     coordinateKeypad.hidden = true;
@@ -716,11 +771,16 @@ let primarySelectionIsManual = false;
 let primaryRequestNumber = 0;
 let aircraftRefreshInFlight = false;
 let primaryPathHex = null;
+let primaryPathSignature = "";
+let primaryDetailHex = null;
+let detailAbortController = null;
+let detailRefreshTimer = null;
 
 function clearPrimaryAircraftPath() {
     primaryPathOutline.setLatLngs([]);
     primaryPathLine.setLatLngs([]);
     primaryPathHex = null;
+    primaryPathSignature = "";
 }
 
 function displayPrimaryAircraftPath(aircraft) {
@@ -739,9 +799,20 @@ function displayPrimaryAircraftPath(aircraft) {
             longitude !== 0
         ));
 
+    const signature = path.length
+        ? `${path.length}:${path[0].join(",")}:${path.at(-1).join(",")}`
+        : "empty";
+
+    if (primaryPathHex === (aircraft && aircraft.hex) && (
+        primaryPathSignature === signature
+    )) {
+        return;
+    }
+
     primaryPathOutline.setLatLngs(path);
     primaryPathLine.setLatLngs(path);
     primaryPathHex = aircraft ? aircraft.hex : null;
+    primaryPathSignature = signature;
 }
 
 function clearPrimaryAircraft() {
@@ -754,13 +825,22 @@ function clearPrimaryAircraft() {
     displayRoute(null);
     clearPrimaryAircraftPath();
     setRouteAirportHighlights(null);
+    primaryDetailHex = null;
+    if (detailAbortController) {
+        detailAbortController.abort();
+        detailAbortController = null;
+    }
+    window.clearTimeout(detailRefreshTimer);
+    detailRefreshTimer = null;
 }
 
 function displayAircraftImage(aircraft) {
     const image = document.getElementById("primary-aircraft-image");
 
     if (aircraft && aircraft.aircraft_image) {
-        image.src = aircraft.aircraft_image;
+        if (image.getAttribute("src") !== aircraft.aircraft_image) {
+            image.src = aircraft.aircraft_image;
+        }
         image.alt = isMissing(aircraft.t)
             ? "Generic aircraft reference photograph"
             : `${aircraft.t} aircraft reference photograph`;
@@ -785,10 +865,29 @@ function displayRoute(aircraft, isLoading = false) {
     const privateLabel = document.getElementById("route-private");
     const airlineText = document.getElementById("route-airline-text");
 
-    if (isLoading) {
+    const routeStatus = aircraft && aircraft.route_status;
+    const lookupPending = ["loading", "busy"].includes(routeStatus);
+    const lookupRetrying = routeStatus === "retrying";
+
+    if (isLoading || lookupPending) {
         departure.textContent = "...";
-        departureName.textContent = "";
+        departureName.textContent = "Looking up route";
         destination.textContent = "...";
+        destinationName.textContent = "";
+    } else if (lookupRetrying) {
+        departure.textContent = "N/A";
+        departureName.textContent = "Lookup delayed; retry scheduled";
+        destination.textContent = "N/A";
+        destinationName.textContent = "";
+    } else if (routeStatus === "unavailable") {
+        departure.textContent = "N/A";
+        departureName.textContent = "No public route found";
+        destination.textContent = "N/A";
+        destinationName.textContent = "";
+    } else if (routeStatus === "disabled") {
+        departure.textContent = "N/A";
+        departureName.textContent = "External lookup off";
+        destination.textContent = "N/A";
         destinationName.textContent = "";
     } else {
         departure.textContent = aircraft
@@ -806,7 +905,9 @@ function displayRoute(aircraft, isLoading = false) {
     }
 
     if (aircraft && aircraft.airline_logo) {
-        logo.src = aircraft.airline_logo;
+        if (logo.getAttribute("src") !== aircraft.airline_logo) {
+            logo.src = aircraft.airline_logo;
+        }
         logo.alt = aircraft.airline && aircraft.airline !== "NA"
             ? `${aircraft.airline} logo`
             : "Airline logo";
@@ -819,7 +920,7 @@ function displayRoute(aircraft, isLoading = false) {
         logo.removeAttribute("src");
         logo.alt = "";
         const showPrivate = Boolean(
-            aircraft && aircraft.is_private && !isLoading
+            aircraft && aircraft.is_private && !isLoading && !lookupPending
         );
         const airlineName = aircraft && !isMissing(aircraft.airline)
             ? aircraft.airline
@@ -830,7 +931,7 @@ function displayRoute(aircraft, isLoading = false) {
         privateLabel.hidden = !showPrivate;
         airlineText.textContent = airlineName;
         airlineText.hidden = Boolean(
-            isLoading || showPrivate || !airlineName
+            isLoading || lookupPending || showPrivate || !airlineName
         );
     }
 }
@@ -879,47 +980,83 @@ function renderAircraftList(aircraft, excludedHex) {
     count.textContent = String(tableAircraft.length).padStart(2, "0");
 
     if (tableAircraft.length === 0) {
-        const message = document.createElement("p");
-        message.className = "list-message";
-        message.textContent = aircraft.length
+        for (const row of aircraftRows.values()) {
+            row.remove();
+        }
+        aircraftRows.clear();
+        let message = list.querySelector(".list-message");
+        if (!message) {
+            message = document.createElement("p");
+            message.className = "list-message";
+            list.append(message);
+        }
+        const text = aircraft.length
             ? "No other aircraft detected"
             : "No aircraft detected";
-        list.replaceChildren(message);
+        if (message.textContent !== text) {
+            message.textContent = text;
+        }
         return;
     }
 
-    const rows = document.createDocumentFragment();
+    list.querySelector(".list-message")?.remove();
+    const retainedHexes = new Set();
+    let insertionPoint = list.firstElementChild;
 
     for (const item of tableAircraft) {
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "aircraft-row";
+        retainedHexes.add(item.hex);
+        let row = aircraftRows.get(item.hex);
+        if (!row) {
+            row = document.createElement("button");
+            row.type = "button";
+            row.className = "aircraft-row";
+            row.append(
+                Object.assign(document.createElement("span"), {
+                    className: "row-callsign"
+                }),
+                Object.assign(document.createElement("span"), {
+                    className: "row-type"
+                }),
+                Object.assign(document.createElement("span"), {
+                    className: "row-altitude"
+                })
+            );
+            row.addEventListener("click", () => {
+                selectAircraft(row.dataset.aircraftHex);
+            });
+            aircraftRows.set(item.hex, row);
+        }
         row.dataset.aircraftHex = item.hex;
-        row.setAttribute(
-            "aria-label",
-            `Select ${listValue(item.callsign)} as primary aircraft`
-        );
+        const callsignText = listValue(item.callsign);
+        const typeText = listValue(item.t);
+        const altitudeText = formatAltitude(item.alt_baro);
+        const [callsign, type, altitude] = row.children;
+        if (callsign.textContent !== callsignText) {
+            callsign.textContent = callsignText;
+            row.setAttribute(
+                "aria-label",
+                `Select ${callsignText} as primary aircraft`
+            );
+        }
+        if (type.textContent !== typeText) {
+            type.textContent = typeText;
+        }
+        if (altitude.textContent !== altitudeText) {
+            altitude.textContent = altitudeText;
+        }
 
-        const callsign = document.createElement("span");
-        callsign.className = "row-callsign";
-        callsign.textContent = listValue(item.callsign);
-
-        const type = document.createElement("span");
-        type.className = "row-type";
-        type.textContent = listValue(item.t);
-
-        const altitude = document.createElement("span");
-        altitude.className = "row-altitude";
-        altitude.textContent = formatAltitude(item.alt_baro);
-
-        row.append(callsign, type, altitude);
-        row.addEventListener("click", () => {
-            selectAircraft(item.hex);
-        });
-        rows.append(row);
+        if (row !== insertionPoint) {
+            list.insertBefore(row, insertionPoint);
+        }
+        insertionPoint = row.nextElementSibling;
     }
 
-    list.replaceChildren(rows);
+    for (const [hex, row] of aircraftRows) {
+        if (!retainedHexes.has(hex)) {
+            row.remove();
+            aircraftRows.delete(hex);
+        }
+    }
 }
 
 function airportCodes(airport) {
@@ -1272,9 +1409,10 @@ function updateAircraftMotion(item, marker, latitude, longitude) {
 }
 
 let lastMotionFrame = 0;
+let animationLoopRunning = false;
 
 function animateAircraftMarkers(frameTime) {
-    if (frameTime - lastMotionFrame >= 50) {
+    if (!constrainedProfile && !document.hidden && frameTime - lastMotionFrame >= 50) {
         const now = Date.now();
         const projectionLimitMs = Math.min(
             Math.max(expectedAircraftUpdateMs * 2, 15000),
@@ -1324,13 +1462,30 @@ function animateAircraftMarkers(frameTime) {
                 }
             }
 
-            marker.setLatLng([displayed.lat, displayed.lon]);
+            const current = marker.getLatLng();
+            if (
+                Math.abs(current.lat - displayed.lat) > 0.000001 ||
+                Math.abs(current.lng - displayed.lon) > 0.000001
+            ) {
+                marker.setLatLng([displayed.lat, displayed.lon]);
+            }
         }
 
         lastMotionFrame = frameTime;
     }
 
-    window.requestAnimationFrame(animateAircraftMarkers);
+    if (constrainedProfile) {
+        animationLoopRunning = false;
+    } else {
+        window.requestAnimationFrame(animateAircraftMarkers);
+    }
+}
+
+function ensureAnimationLoop() {
+    if (!constrainedProfile && !animationLoopRunning) {
+        animationLoopRunning = true;
+        window.requestAnimationFrame(animateAircraftMarkers);
+    }
 }
 
 function aircraftMapIcon(aircraft) {
@@ -1338,9 +1493,6 @@ function aircraftMapIcon(aircraft) {
     const rotation = Number.isFinite(heading) ? heading : 0;
     const typeLabel = escapeHtml(listValue(aircraft.t));
     const markerSize = aircraftMarkerSize();
-    const selectedClass = aircraft.hex === primaryAircraftHex
-        ? " is-selected"
-        : "";
     const isHelicopter = aircraft.category === "Rotorcraft/Helicopter";
     const aircraftGlyph = isHelicopter
         ? '<svg class="aircraft-map-icon helicopter-map-icon" ' +
@@ -1355,7 +1507,7 @@ function aircraftMapIcon(aircraft) {
           "</svg>";
 
     return L.divIcon({
-        className: `aircraft-map-marker${selectedClass}`,
+        className: "aircraft-map-marker",
         html:
             '<div class="aircraft-map-symbol" ' +
             `style="--marker-size:${markerSize}px;` +
@@ -1368,6 +1520,33 @@ function aircraftMapIcon(aircraft) {
         iconSize: [markerSize + 76, markerSize],
         iconAnchor: [markerSize / 2, markerSize / 2]
     });
+}
+
+function aircraftIconKey(aircraft) {
+    return [
+        aircraftMarkerSize(),
+        listValue(aircraft.t),
+        aircraft.category === "Rotorcraft/Helicopter" ? "helicopter" : "plane"
+    ].join(":");
+}
+
+function updateAircraftMarkerAppearance(marker, aircraft) {
+    const element = marker.getElement();
+    if (!element) {
+        return;
+    }
+    element.classList.toggle(
+        "is-selected",
+        aircraft.hex === primaryAircraftHex
+    );
+    const heading = Number(aircraft.track);
+    const symbol = element.querySelector(".aircraft-map-symbol");
+    if (symbol) {
+        const rotation = `${Number.isFinite(heading) ? heading : 0}deg`;
+        if (symbol.style.getPropertyValue("--aircraft-rotation") !== rotation) {
+            symbol.style.setProperty("--aircraft-rotation", rotation);
+        }
+    }
 }
 
 function updateAircraftMarkers(aircraft) {
@@ -1389,10 +1568,13 @@ function updateAircraftMarkers(aircraft) {
 
         currentHexes.add(item.hex);
         let marker = aircraftMarkers.get(item.hex);
+        const iconKey = aircraftIconKey(item);
 
         if (marker) {
-            marker.setIcon(aircraftMapIcon(item));
-            marker.unbindTooltip();
+            if (marker.aircraftIconKey !== iconKey) {
+                marker.setIcon(aircraftMapIcon(item));
+                marker.aircraftIconKey = iconKey;
+            }
         } else {
             marker = L.marker([latitude, longitude], {
                 icon: aircraftMapIcon(item),
@@ -1401,18 +1583,34 @@ function updateAircraftMarkers(aircraft) {
             });
             marker.on("click", () => selectAircraft(item.hex, true));
             marker.addTo(map);
+            marker.aircraftIconKey = iconKey;
             aircraftMarkers.set(item.hex, marker);
         }
 
-        updateAircraftMotion(item, marker, latitude, longitude);
+        updateAircraftMarkerAppearance(marker, item);
 
-        const tooltip = document.createElement("span");
-        tooltip.textContent = listValue(item.callsign);
-        marker.bindTooltip(tooltip, {
-            className: "aircraft-map-tooltip",
-            direction: "top",
-            offset: [0, -aircraftMarkerSize() / 2]
-        });
+        updateAircraftMotion(item, marker, latitude, longitude);
+        if (constrainedProfile) {
+            const current = marker.getLatLng();
+            if (current.lat !== latitude || current.lng !== longitude) {
+                marker.setLatLng([latitude, longitude]);
+            }
+        }
+
+        const tooltip = listValue(item.callsign);
+        if (marker.aircraftTooltip !== tooltip) {
+            if (marker.getTooltip()) {
+                marker.setTooltipContent(tooltip);
+            } else {
+                marker.bindTooltip(tooltip, {
+                    className: "aircraft-map-tooltip",
+                    direction: "top",
+                    offset: [0, -aircraftMarkerSize() / 2]
+                });
+            }
+            marker.aircraftTooltip = tooltip;
+            marker.getElement()?.setAttribute("title", tooltip);
+        }
     }
 
     for (const [hex, marker] of aircraftMarkers) {
@@ -1429,7 +1627,7 @@ map.on("zoomend", () => {
     updateAircraftMarkers(visibleAircraft);
 });
 
-window.requestAnimationFrame(animateAircraftMarkers);
+ensureAnimationLoop();
 
 function aircraftDetailUrl(aircraftHex) {
     return aircraftDetailUrlTemplate.replace(
@@ -1463,7 +1661,14 @@ async function loadPrimaryAircraft(aircraftHex) {
     const basicAircraft = visibleAircraft.find(
         (item) => item.hex === aircraftHex
     );
-    const selectionChanged = primaryPathHex !== aircraftHex;
+    const selectionChanged = primaryDetailHex !== aircraftHex;
+
+    if (selectionChanged && detailAbortController) {
+        detailAbortController.abort();
+    }
+    window.clearTimeout(detailRefreshTimer);
+    detailRefreshTimer = null;
+    primaryDetailHex = aircraftHex;
 
     if (selectionChanged) {
         clearPrimaryAircraftPath();
@@ -1478,8 +1683,14 @@ async function loadPrimaryAircraft(aircraftHex) {
         selectionChanged
     );
 
+    const controller = new AbortController();
+    detailAbortController = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 8000);
+
     try {
-        const response = await fetch(aircraftDetailUrl(aircraftHex));
+        const response = await fetch(aircraftDetailUrl(aircraftHex), {
+            signal: controller.signal
+        });
 
         if (response.status === 404) {
             const error = new Error("Aircraft is no longer available");
@@ -1500,16 +1711,45 @@ async function loadPrimaryAircraft(aircraftHex) {
             displayPrimaryAircraft(aircraft);
             displayPrimaryAircraftPath(aircraft);
             setRouteAirportHighlights(aircraft);
+
+            if (["loading", "busy", "retrying"].includes(
+                aircraft.route_status
+            )) {
+                const retryDelay = aircraft.route_status === "retrying"
+                    ? Math.max(
+                        5000,
+                        Math.min(
+                            60000,
+                            Number(aircraft.route_retry_after) * 1000 - Date.now()
+                        )
+                    )
+                    : 5000;
+                detailRefreshTimer = window.setTimeout(() => {
+                    if (
+                        aircraftHex === primaryAircraftHex &&
+                        !document.hidden
+                    ) {
+                        loadPrimaryAircraft(aircraftHex);
+                    }
+                }, retryDelay);
+            }
         }
     } catch (error) {
-        console.error("Could not retrieve selected aircraft:", error);
+        if (error.name !== "AbortError") {
+            console.error("Could not retrieve selected aircraft:", error);
+        }
 
-        if (requestNumber === primaryRequestNumber) {
+        if (error.name !== "AbortError" && requestNumber === primaryRequestNumber) {
             if (error.aircraftMissing) {
                 returnToNearestAfterMissing(aircraftHex);
             } else {
                 displayPrimaryAircraft(basicAircraft);
             }
+        }
+    } finally {
+        window.clearTimeout(timeout);
+        if (detailAbortController === controller) {
+            detailAbortController = null;
         }
     }
 }
@@ -1534,7 +1774,7 @@ function selectAircraft(aircraftHex, manual = true) {
         const marker = aircraftMarkers.get(item.hex);
 
         if (marker) {
-            marker.setIcon(aircraftMapIcon(item));
+            updateAircraftMarkerAppearance(marker, item);
         }
     }
 
@@ -1544,14 +1784,19 @@ function selectAircraft(aircraftHex, manual = true) {
 window.selectAircraft = selectAircraft;
 
 async function updateAircraftDisplay() {
-    if (aircraftRefreshInFlight) {
+    if (document.hidden || aircraftRefreshInFlight) {
         return;
     }
 
     aircraftRefreshInFlight = true;
+    const startedAt = performance.now();
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
 
     try {
-        const response = await fetch(allAircraftUrl);
+        const response = await fetch(allAircraftUrl, {
+            signal: controller.signal
+        });
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -1584,13 +1829,58 @@ async function updateAircraftDisplay() {
                 ? "Selected contact"
                 : "Nearest contact";
         renderAircraftList(visibleAircraft, primaryAircraftHex);
-        await loadPrimaryAircraft(primaryAircraftHex);
+        const basicAircraft = visibleAircraft.find(
+            (item) => item.hex === primaryAircraftHex
+        );
+        displayPrimaryAircraft(basicAircraft, false, false);
+        if (primaryDetailHex !== primaryAircraftHex) {
+            loadPrimaryAircraft(primaryAircraftHex);
+        }
     } catch (error) {
-        console.error("Could not retrieve aircraft list:", error);
+        if (error.name !== "AbortError") {
+            console.error("Could not retrieve aircraft list:", error);
+        }
     } finally {
+        window.clearTimeout(timeout);
         aircraftRefreshInFlight = false;
+        recordFrontendUpdate(performance.now() - startedAt);
     }
 }
+
+let frontendUpdateCount = 0;
+let frontendUpdateTotalMs = 0;
+let frontendLastReport = performance.now();
+
+function recordFrontendUpdate(durationMs) {
+    frontendUpdateCount += 1;
+    frontendUpdateTotalMs += durationMs;
+    const now = performance.now();
+    if (now - frontendLastReport < 60000) {
+        return;
+    }
+    console.info("Radar frontend diagnostics", {
+        averageUpdateMs: Number(
+            (frontendUpdateTotalMs / frontendUpdateCount).toFixed(1)
+        ),
+        aircraftMarkers: aircraftMarkers.size,
+        aircraftRows: aircraftRows.size,
+        trailPoints: primaryPathLine.getLatLngs().length,
+        constrainedProfile
+    });
+    frontendUpdateCount = 0;
+    frontendUpdateTotalMs = 0;
+    frontendLastReport = now;
+}
+
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+        updateAircraftDisplay();
+        if (primaryAircraftHex) {
+            loadPrimaryAircraft(primaryAircraftHex);
+        }
+        ensureAnimationLoop();
+    }
+});
 
 loadModeSettings();
 loadAirports();

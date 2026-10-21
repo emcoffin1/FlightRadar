@@ -1,6 +1,7 @@
 """SQLite connection and schema helpers shared by the web and collector."""
 
 import csv
+from contextlib import contextmanager
 import gzip
 import sqlite3
 
@@ -8,11 +9,15 @@ from config import (
     DATABASE_PATH,
     AIRCRAFT_METADATA_PATH,
     DEFAULT_ADSB_LOL_FEED_ENABLED,
+    DEFAULT_CONSTRAINED_PROFILE_ENABLED,
+    DEFAULT_EXTERNAL_TILES_ENABLED,
     DEFAULT_LAT,
     DEFAULT_LOCAL_RECEIVER_ENABLED,
     DEFAULT_LON,
     DEFAULT_RECEIVER_ADDRESS,
     DEFAULT_RECEIVER_BEAST_PORT,
+    DEFAULT_REMOTE_AIRCRAFT_ENABLED,
+    DEFAULT_ROUTE_ENRICHMENT_ENABLED,
     DEFAULT_SEARCH_RANGE,
 )
 
@@ -26,12 +31,20 @@ def decode_database_flags(value):
     )
 
 
+@contextmanager
 def connect_database(db_path=DATABASE_PATH, *, rows=False):
     connection = sqlite3.connect(db_path)
     connection.execute("PRAGMA foreign_keys = ON")
     if rows:
         connection.row_factory = sqlite3.Row
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def ensure_aircraft_schema(conn, *, create_table=False):
@@ -151,6 +164,21 @@ def ensure_aircraft_schema(conn, *, create_table=False):
         CREATE INDEX IF NOT EXISTS idx_adsb_data_hex_lower
         ON adsb_data (lower(hex))
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS route_cache (
+            callsign TEXT PRIMARY KEY,
+            airline TEXT,
+            airline_icao TEXT,
+            departure TEXT,
+            departure_name TEXT,
+            destination TEXT,
+            destination_name TEXT,
+            status TEXT NOT NULL,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            retry_after REAL,
+            updated_at REAL NOT NULL
+        )
+    """)
 
 
 def ensure_aircraft_metadata(conn, metadata_path=AIRCRAFT_METADATA_PATH):
@@ -261,6 +289,13 @@ def ensure_mode_settings(conn):
             receiver_address TEXT NOT NULL DEFAULT '/run/readsb/aircraft.json',
             receiver_beast_port INTEGER NOT NULL DEFAULT 30005,
             adsblol_feed_enabled INTEGER NOT NULL DEFAULT 0,
+            adsblol_upload_enabled INTEGER NOT NULL DEFAULT 0,
+            remote_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
+            route_enrichment_enabled INTEGER NOT NULL DEFAULT 0,
+            external_tiles_enabled INTEGER NOT NULL DEFAULT 0,
+            offline_mode_enabled INTEGER NOT NULL DEFAULT 0,
+            constrained_profile_enabled INTEGER NOT NULL DEFAULT 1,
+            network_settings_migrated INTEGER NOT NULL DEFAULT 1,
             local_default_applied INTEGER NOT NULL DEFAULT 1
         )
     """)
@@ -316,6 +351,40 @@ def ensure_mode_settings(conn):
             f"DEFAULT {int(DEFAULT_ADSB_LOL_FEED_ENABLED)}"
         )
 
+    network_columns = {
+        "adsblol_upload_enabled": int(DEFAULT_ADSB_LOL_FEED_ENABLED),
+        "remote_aircraft_enabled": int(DEFAULT_REMOTE_AIRCRAFT_ENABLED),
+        "route_enrichment_enabled": int(DEFAULT_ROUTE_ENRICHMENT_ENABLED),
+        "external_tiles_enabled": int(DEFAULT_EXTERNAL_TILES_ENABLED),
+        "offline_mode_enabled": 0,
+        "constrained_profile_enabled": int(
+            DEFAULT_CONSTRAINED_PROFILE_ENABLED
+        ),
+    }
+    for name, default in network_columns.items():
+        if name not in columns:
+            conn.execute(
+                f"ALTER TABLE app_settings ADD COLUMN {name} "
+                f"INTEGER NOT NULL DEFAULT {default}"
+            )
+
+    if "network_settings_migrated" not in columns:
+        conn.execute(
+            "ALTER TABLE app_settings ADD COLUMN network_settings_migrated "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    # The former single setting enabled both upload and public polling. Keep
+    # those explicit choices during migration, while new route/tile access
+    # remains opt-in so a local installation does not gain hidden traffic.
+    conn.execute("""
+        UPDATE app_settings
+        SET adsblol_upload_enabled = adsblol_feed_enabled,
+            remote_aircraft_enabled = adsblol_feed_enabled,
+            network_settings_migrated = 1
+        WHERE network_settings_migrated = 0
+    """)
+
     # Existing installations predate the local-first behavior. Apply the new
     # default once without overriding later choices made in the dialog.
     if "local_default_applied" not in columns:
@@ -347,8 +416,15 @@ def ensure_mode_settings(conn):
             receiver_address,
             receiver_beast_port,
             adsblol_feed_enabled,
+            adsblol_upload_enabled,
+            remote_aircraft_enabled,
+            route_enrichment_enabled,
+            external_tiles_enabled,
+            offline_mode_enabled,
+            constrained_profile_enabled,
+            network_settings_migrated,
             local_default_applied
-        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, 1)
+        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
     """, (
         DEFAULT_LAT,
         DEFAULT_LON,
@@ -357,4 +433,10 @@ def ensure_mode_settings(conn):
         DEFAULT_RECEIVER_ADDRESS,
         DEFAULT_RECEIVER_BEAST_PORT,
         int(DEFAULT_ADSB_LOL_FEED_ENABLED),
+        int(DEFAULT_ADSB_LOL_FEED_ENABLED),
+        int(DEFAULT_REMOTE_AIRCRAFT_ENABLED),
+        int(DEFAULT_ROUTE_ENRICHMENT_ENABLED),
+        int(DEFAULT_EXTERNAL_TILES_ENABLED),
+        0,
+        int(DEFAULT_CONSTRAINED_PROFILE_ENABLED),
     ))

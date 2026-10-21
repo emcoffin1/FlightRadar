@@ -1,4 +1,6 @@
+from collections import Counter
 from math import atan2, cos, radians, sin, sqrt
+from threading import Lock
 
 import requests
 
@@ -80,6 +82,24 @@ class ADSB_LOL:
         self.LAT = lat
         self.LON = lon
         self.RANGE = range
+        self._request_counts = Counter()
+        self._request_counts_lock = Lock()
+
+    def _external_get(self, provider, url, **kwargs):
+        try:
+            response = requests.get(url, **kwargs)
+        except requests.exceptions.RequestException:
+            with self._request_counts_lock:
+                self._request_counts[f"{provider}:exception"] += 1
+            raise
+        outcome = str(response.status_code)
+        with self._request_counts_lock:
+            self._request_counts[f"{provider}:{outcome}"] += 1
+        return response
+
+    def request_diagnostics(self):
+        with self._request_counts_lock:
+            return dict(self._request_counts)
 
 
     def GET_all(self, range=25, military=True, normal=True):
@@ -303,7 +323,7 @@ class ADSB_LOL:
         # ADSBDB accepts either an ICAO or IATA callsign and includes the
         # airline plus both IATA and ICAO airport codes in a successful route.
         url = f"https://api.adsbdb.com/v0/callsign/{callsign}"
-        response = requests.get(url, timeout=15)
+        response = self._external_get("adsbdb", url, timeout=15)
 
         if response.status_code == 200:
             route = response.json().get('response', {}).get('flightroute')
@@ -342,7 +362,7 @@ class ADSB_LOL:
         # HexDB's route lookup expects the ICAO-style callsign broadcast by
         # ADS-B (AAL123, SWA456, etc.), not an IATA flight number.
         url = f"https://hexdb.io/api/v1/route/icao/{callsign}"
-        response = requests.get(url, timeout=15)
+        response = self._external_get("hexdb", url, timeout=15)
 
         if response.status_code == 200:
             route = response.json().get('route')
@@ -377,7 +397,7 @@ class ADSB_LOL:
         
         url = f"https://api.adsb.lol/v2/point/{self.LAT}/{self.LON}/{range}"
 
-        response = requests.get(url, timeout=15)
+        response = self._external_get("adsblol_point", url, timeout=15)
         response.raise_for_status()
         response = response.json()
         data = self._filter_format(data=response, max_range=range)
@@ -392,7 +412,7 @@ class ADSB_LOL:
 
         url = f"https://api.adsb.lol/v2/closest/{self.LAT}/{self.LON}/{range}"
         
-        response = requests.get(url, timeout=15)
+        response = self._external_get("adsblol_closest", url, timeout=15)
         response.raise_for_status()
         response = response.json()
         data = self._filter_format(data=response)

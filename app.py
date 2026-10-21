@@ -1,3 +1,4 @@
+from collections import Counter
 import csv
 import json
 import logging
@@ -21,6 +22,7 @@ import time
 import requests
 from flask import (
     Flask,
+    Response,
     abort,
     jsonify,
     render_template,
@@ -43,10 +45,12 @@ from database import (
     ensure_mode_settings,
 )
 from local_receiver import receiver_json_location
+from route_enrichment import RouteLookupCoordinator
 from config import (
     AIRCRAFT_REFRESH_SECONDS,
     AIRPORT_DATA_PATH,
     MAX_TILE_RADIUS_NM,
+    HISTORY_MAX_POINTS,
     OSM_TILE_URL,
     OSM_TILE_USER_AGENT,
     SEARCH_RANGE_OPTIONS,
@@ -62,8 +66,14 @@ LOGGER = logging.getLogger("adsb_display")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 adsb_client = ADSB_LOL()
+route_coordinator = RouteLookupCoordinator(adsb_client.GET_flight_info)
 collector_thread = None
 airport_data_lock = Lock()
+external_request_counts = Counter()
+TRANSPARENT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c6360000000020001e221bc330000000049454e44ae426082"
+)
 
 
 def start_aircraft_collector():
@@ -74,6 +84,7 @@ def start_aircraft_collector():
 
     collector_thread = Thread(
         target=run_collector,
+        args=(adsb_client,),
         name="aircraft-collector",
         daemon=True,
     )
@@ -360,7 +371,6 @@ def serialize_aircraft(row):
 
 def get_aircraft_by_hex(aircraft_hex):
     with connect_database(rows=True) as conn:
-        ensure_aircraft_schema(conn)
         aircraft = conn.execute("""
             SELECT
                 hex,
@@ -393,7 +403,6 @@ def get_aircraft_by_hex(aircraft_hex):
 
 def get_aircraft_path(aircraft_hex):
     with connect_database(rows=True) as conn:
-        ensure_aircraft_schema(conn)
         positions = conn.execute("""
             SELECT
                 aircraft_positions.recorded_at,
@@ -403,57 +412,48 @@ def get_aircraft_path(aircraft_hex):
             JOIN adsb_data
                 ON adsb_data.id = aircraft_positions.aircraft_id
             WHERE lower(adsb_data.hex) = lower(?)
-            ORDER BY aircraft_positions.recorded_at ASC
-        """, (aircraft_hex,)).fetchall()
+            ORDER BY aircraft_positions.recorded_at DESC
+            LIMIT ?
+        """, (aircraft_hex, HISTORY_MAX_POINTS)).fetchall()
 
-    return [dict(position) for position in positions]
+    return [dict(position) for position in reversed(positions)]
 
 
 def resolve_aircraft_route(aircraft):
     if aircraft is None:
         return aircraft
+    aircraft = dict(aircraft)
 
     if aircraft["route_lookup_complete"] and aircraft["departure"] is not None:
-        return aircraft
-
-    try:
-        route = adsb_client.GET_flight_info(
-            callsign=aircraft["callsign"],
-            hex=aircraft["hex"],
-        )
-    except requests.exceptions.RequestException as error:
-        LOGGER.warning(
-            "Route lookup failed for %s: %s",
-            aircraft["callsign"] or aircraft["hex"],
-            error,
+        aircraft["route_status"] = (
+            "unavailable"
+            if aircraft["departure"] in {"NA", "N/A"}
+            else "ready"
         )
         return aircraft
 
     with connect_database(rows=True) as conn:
-        ensure_aircraft_schema(conn)
-        conn.execute("""
-            UPDATE adsb_data
-            SET airline = ?,
-                airline_icao = ?,
-                departure = ?,
-                departure_name = ?,
-                destination = ?,
-                destination_name = ?,
-                route_lookup_complete = 1
-            WHERE lower(hex) = lower(?)
-                AND callsign IS ?
-        """, (
-            route["airline"],
-            route["airline_icao"],
-            route["departure"],
-            route["departure_name"],
-            route["destination"],
-            route["destination_name"],
-            aircraft["hex"],
-            aircraft["callsign"],
-        ))
+        settings = conn.execute("""
+            SELECT route_enrichment_enabled, offline_mode_enabled
+            FROM app_settings
+            WHERE id = 1
+        """).fetchone()
 
-    return get_aircraft_by_hex(aircraft["hex"])
+    external_enabled = bool(settings["route_enrichment_enabled"]) and not bool(
+        settings["offline_mode_enabled"]
+    )
+    state = route_coordinator.get_or_enqueue(
+        aircraft["callsign"],
+        aircraft["hex"],
+        external_enabled,
+    )
+    if state.get("route"):
+        aircraft.update(state["route"])
+        aircraft["route_lookup_complete"] = 1
+    aircraft["route_status"] = state["status"]
+    if "retry_after" in state:
+        aircraft["route_retry_after"] = state["retry_after"]
+    return aircraft
 
 
 def serialize_mode_settings(row):
@@ -465,15 +465,25 @@ def serialize_mode_settings(row):
 
 
 def serialize_coordinates(row):
+    upload_enabled = bool(row["adsblol_upload_enabled"])
+    remote_enabled = bool(row["remote_aircraft_enabled"])
     return {
         "lat": float(row["center_lat"]),
         "lon": float(row["center_lon"]),
         "local_receiver_enabled": bool(row["local_receiver_enabled"]),
         "receiver_address": row["receiver_address"],
         "receiver_beast_port": int(row["receiver_beast_port"]),
-        "adsblol_enabled": bool(row["adsblol_feed_enabled"]),
-        # Retained for clients using the original feed-only setting name.
-        "adsblol_feed_enabled": bool(row["adsblol_feed_enabled"]),
+        "adsblol_upload_enabled": upload_enabled,
+        "remote_aircraft_enabled": remote_enabled,
+        "route_enrichment_enabled": bool(row["route_enrichment_enabled"]),
+        "external_tiles_enabled": bool(row["external_tiles_enabled"]),
+        "offline_mode_enabled": bool(row["offline_mode_enabled"]),
+        "constrained_profile_enabled": bool(
+            row["constrained_profile_enabled"]
+        ),
+        # Compatibility for the former combined switch.
+        "adsblol_enabled": upload_enabled and remote_enabled,
+        "adsblol_feed_enabled": upload_enabled,
     }
 
 
@@ -573,9 +583,11 @@ def map_tile(z, x, y):
         abort(404)
 
     with connect_database(rows=True) as conn:
-        ensure_mode_settings(conn)
         center = conn.execute("""
-            SELECT center_lat, center_lon
+            SELECT center_lat,
+                center_lon,
+                external_tiles_enabled,
+                offline_mode_enabled
             FROM app_settings
             WHERE id = 1
         """).fetchone()
@@ -604,6 +616,21 @@ def map_tile(z, x, y):
         if expires_at > now:
             return serve_cached_tile(tile_path, expires_at - now)
 
+    external_tiles_enabled = bool(center["external_tiles_enabled"]) and not bool(
+        center["offline_mode_enabled"]
+    )
+    if not external_tiles_enabled:
+        if tile_path.is_file():
+            return serve_cached_tile(
+                tile_path,
+                TILE_CACHE_MIN_SECONDS,
+                cache_status="OFFLINE-STALE",
+            )
+        response = Response(TRANSPARENT_PNG, mimetype="image/png")
+        response.headers["Cache-Control"] = "public, max-age=300"
+        response.headers["X-Local-Tile-Cache"] = "OFFLINE-MISSING"
+        return response
+
     fetch_headers = {
         "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
         "User-Agent": OSM_TILE_USER_AGENT,
@@ -618,6 +645,7 @@ def map_tile(z, x, y):
 
     try:
         response = requests.get(source_url, headers=fetch_headers, timeout=(5, 20))
+        external_request_counts[f"openstreetmap:{response.status_code}"] += 1
 
         if response.status_code == 304 and tile_path.is_file():
             cache_seconds = tile_cache_seconds(response.headers)
@@ -639,6 +667,7 @@ def map_tile(z, x, y):
                 f"Tile server returned {content_type or 'unknown content'}"
             )
     except requests.exceptions.RequestException as error:
+        external_request_counts["openstreetmap:exception"] += 1
         if tile_path.is_file():
             LOGGER.warning("Using stale map tile %s after: %s", tile_path, error)
             return serve_cached_tile(
@@ -672,9 +701,11 @@ def map_tile(z, x, y):
 @app.route("/")
 def hello_world():
     with connect_database(rows=True) as conn:
-        ensure_mode_settings(conn)
         coordinates = conn.execute("""
-            SELECT center_lat, center_lon, search_range_nm
+            SELECT center_lat,
+                center_lon,
+                search_range_nm,
+                constrained_profile_enabled
             FROM app_settings
             WHERE id = 1
         """).fetchone()
@@ -687,6 +718,9 @@ def hello_world():
             float(coordinates["center_lon"]),
         ],
         search_range_nm=int(coordinates["search_range_nm"]),
+        constrained_profile_enabled=bool(
+            coordinates["constrained_profile_enabled"]
+        ),
     )
 
 
@@ -696,7 +730,6 @@ def get_airports():
         return jsonify({"error": "Local airport data is unavailable"}), 503
 
     with connect_database(rows=True) as conn:
-        ensure_mode_settings(conn)
         settings = conn.execute("""
             SELECT center_lat, center_lon, search_range_nm
             FROM app_settings
@@ -796,8 +829,6 @@ def get_airports():
 @app.route("/api/aircraft")
 def get_all_aircraft():
     with connect_database(rows=True) as conn:
-        ensure_aircraft_schema(conn)
-        ensure_mode_settings(conn)
         display_range = conn.execute("""
             SELECT search_range_nm
             FROM app_settings
@@ -844,8 +875,6 @@ def get_aircraft(aircraft_hex):
 @app.route("/api/settings/modes", methods=["GET", "PATCH"])
 def mode_settings():
     with connect_database(rows=True) as conn:
-        ensure_mode_settings(conn)
-
         if request.method == "PATCH":
             data = request.get_json(silent=True)
 
@@ -906,8 +935,6 @@ def mode_settings():
 @app.route("/api/settings/coordinates", methods=["GET", "PATCH"])
 def coordinate_settings():
     with connect_database(rows=True) as conn:
-        ensure_mode_settings(conn)
-
         if request.method == "PATCH":
             data = request.get_json(silent=True)
 
@@ -920,7 +947,13 @@ def coordinate_settings():
                     local_receiver_enabled,
                     receiver_address,
                     receiver_beast_port,
-                    adsblol_feed_enabled
+                    adsblol_feed_enabled,
+                    adsblol_upload_enabled,
+                    remote_aircraft_enabled,
+                    route_enrichment_enabled,
+                    external_tiles_enabled,
+                    offline_mode_enabled,
+                    constrained_profile_enabled
                 FROM app_settings
                 WHERE id = 1
             """).fetchone()
@@ -943,6 +976,12 @@ def coordinate_settings():
                 "local_receiver_enabled",
                 "adsblol_enabled",
                 "adsblol_feed_enabled",
+                "adsblol_upload_enabled",
+                "remote_aircraft_enabled",
+                "route_enrichment_enabled",
+                "external_tiles_enabled",
+                "offline_mode_enabled",
+                "constrained_profile_enabled",
             ):
                 if name in data and not isinstance(data[name], bool):
                     return jsonify({"error": f"{name} must be true or false"}), 400
@@ -977,6 +1016,23 @@ def coordinate_settings():
                     "error": "receiver_beast_port must be between 1 and 65535",
                 }), 400
 
+            legacy_combined = data.get(
+                "adsblol_enabled",
+                data.get("adsblol_feed_enabled"),
+            )
+            upload_enabled = data.get(
+                "adsblol_upload_enabled",
+                legacy_combined if legacy_combined is not None else bool(
+                    current["adsblol_upload_enabled"]
+                ),
+            )
+            remote_enabled = data.get(
+                "remote_aircraft_enabled",
+                legacy_combined if legacy_combined is not None else bool(
+                    current["remote_aircraft_enabled"]
+                ),
+            )
+
             conn.execute("""
                 UPDATE app_settings
                 SET center_lat = ?,
@@ -984,7 +1040,13 @@ def coordinate_settings():
                     local_receiver_enabled = ?,
                     receiver_address = ?,
                     receiver_beast_port = ?,
-                    adsblol_feed_enabled = ?
+                    adsblol_feed_enabled = ?,
+                    adsblol_upload_enabled = ?,
+                    remote_aircraft_enabled = ?,
+                    route_enrichment_enabled = ?,
+                    external_tiles_enabled = ?,
+                    offline_mode_enabled = ?,
+                    constrained_profile_enabled = ?
                 WHERE id = 1
             """, (
                 latitude,
@@ -995,12 +1057,24 @@ def coordinate_settings():
                 )),
                 receiver_address,
                 beast_port,
+                int(upload_enabled),
+                int(upload_enabled),
+                int(remote_enabled),
                 int(data.get(
-                    "adsblol_enabled",
-                    data.get(
-                        "adsblol_feed_enabled",
-                        bool(current["adsblol_feed_enabled"]),
-                    ),
+                    "route_enrichment_enabled",
+                    bool(current["route_enrichment_enabled"]),
+                )),
+                int(data.get(
+                    "external_tiles_enabled",
+                    bool(current["external_tiles_enabled"]),
+                )),
+                int(data.get(
+                    "offline_mode_enabled",
+                    bool(current["offline_mode_enabled"]),
+                )),
+                int(data.get(
+                    "constrained_profile_enabled",
+                    bool(current["constrained_profile_enabled"]),
                 )),
             ))
 
@@ -1010,7 +1084,13 @@ def coordinate_settings():
                 local_receiver_enabled,
                 receiver_address,
                 receiver_beast_port,
-                adsblol_feed_enabled
+                adsblol_feed_enabled,
+                adsblol_upload_enabled,
+                remote_aircraft_enabled,
+                route_enrichment_enabled,
+                external_tiles_enabled,
+                offline_mode_enabled,
+                constrained_profile_enabled
             FROM app_settings
             WHERE id = 1
         """).fetchone()
@@ -1021,8 +1101,6 @@ def coordinate_settings():
 @app.route("/api/aircraft/closest")
 def get_closest_aircraft():
     with connect_database(rows=True) as conn:
-        ensure_aircraft_schema(conn)
-        ensure_mode_settings(conn)
         display_range = conn.execute("""
             SELECT search_range_nm
             FROM app_settings
@@ -1046,6 +1124,34 @@ def get_closest_aircraft():
 
     aircraft = resolve_aircraft_route(get_aircraft_by_hex(aircraft["hex"]))
     return jsonify(serialize_aircraft(aircraft))
+
+
+@app.route("/api/diagnostics")
+def diagnostics():
+    with connect_database(rows=True) as conn:
+        counts = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM adsb_data) AS aircraft,
+                (SELECT COUNT(*) FROM aircraft_positions) AS trail_points,
+                (SELECT COUNT(*) FROM route_cache) AS route_cache_entries
+        """).fetchone()
+    return jsonify({
+        "database": dict(counts),
+        "external_requests": {
+            **adsb_client.request_diagnostics(),
+            **dict(external_request_counts),
+        },
+        "route_lookup": route_coordinator.diagnostics(),
+    })
+
+
+def initialize_application_database():
+    with connect_database() as conn:
+        ensure_aircraft_schema(conn, create_table=True)
+        ensure_mode_settings(conn)
+
+
+initialize_application_database()
 
 
 if __name__ == "__main__":

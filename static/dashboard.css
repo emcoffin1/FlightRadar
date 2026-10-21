@@ -912,6 +912,21 @@ body {
     filter: grayscale(0.72) sepia(0.12) brightness(0.56) contrast(1.24);
 }
 
+body.constrained-device .leaflet-tile-pane,
+body.constrained-device .aircraft-map-icon,
+body.constrained-device .airport-map-glyph {
+    filter: none;
+}
+
+body.constrained-device .coordinate-dialog::backdrop {
+    backdrop-filter: none;
+}
+
+body.constrained-device .aircraft-map-type,
+body.constrained-device .airport-map-label {
+    box-shadow: none;
+}
+
 .leaflet-bar {
     border: 1px solid var(--line) !important;
     border-radius: 4px !important;

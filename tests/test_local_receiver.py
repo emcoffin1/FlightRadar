@@ -135,7 +135,9 @@ class SettingsMigrationTests(unittest.TestCase):
                     SET local_receiver_enabled = 1,
                         receiver_address = 'receiver.local',
                         receiver_beast_port = 30006,
-                        adsblol_feed_enabled = 1
+                        adsblol_feed_enabled = 1,
+                        adsblol_upload_enabled = 1,
+                        remote_aircraft_enabled = 1
                     WHERE id = 1
                 """)
 
@@ -227,7 +229,11 @@ class SettingsMigrationTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="local-receiver-enabled"', page)
-        self.assertIn('id="adsblol-enabled"', page)
+        self.assertIn('id="adsblol-upload-enabled"', page)
+        self.assertIn('id="remote-aircraft-enabled"', page)
+        self.assertIn('id="route-enrichment-enabled"', page)
+        self.assertIn('id="external-tiles-enabled"', page)
+        self.assertIn('id="offline-mode-enabled"', page)
         self.assertIn('id="coordinate-lat"', page)
         self.assertIn('id="coordinate-keypad"', page)
         self.assertIn('data-coordinate-action="backspace"', page)

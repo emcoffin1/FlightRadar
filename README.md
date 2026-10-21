@@ -14,8 +14,8 @@ python3 app.py
 ```
 
 Open `http://<radar-host>:5000`. Use **Coords** to set the receiver latitude
-and longitude, enable the local receiver, choose its address, and enable or
-disable adsb.lol integration.
+and longitude, choose its address, and control each local or external feature
+independently.
 
 The receiver address accepts any of these forms:
 
@@ -24,13 +24,41 @@ The receiver address accepts any of these forms:
 - `pi-zero` or `192.168.1.20`, which resolves to
   `http://<address>/readsb/aircraft.json`.
 
-Local receiver JSON is enabled by default and polled every 1 second. When the
-**Use adsb.lol** toggle is enabled, the public point API is polled every 30
-seconds and local Beast data is uploaded. The local and public snapshots are
-merged by ICAO hex; fresh local position data wins while public metadata fills
-missing fields.
+Local receiver JSON is enabled by default and polled every 1 second. Public
+adsb.lol retrieval uses `ADSB_LOL_POLL_SECONDS` in `config.py` (currently 10
+seconds). The local and public snapshots are merged by ICAO hex; fresh local
+position data wins while public metadata fills missing fields.
 
-## Install `readsb` on the receiver
+## Network and kiosk settings
+
+The coordinate dialog persists these independent settings in `aircraft.db`:
+
+- **Use local receiver** reads the configured local/LAN `aircraft.json`.
+- **Upload to adsb.lol** relays local Beast data; it does not enable retrieval.
+- **Remote adsb.lol aircraft** polls the public point API; it does not upload.
+- **External route lookup** permits background ADSBDB/HexDB lookups.
+- **Download map tiles** permits OpenStreetMap cache misses and revalidation.
+- **Offline mode** overrides every external option without disabling local data.
+- **Low-resource kiosk mode** disables continuous marker extrapolation and
+  expensive map/icon filters while retaining one-second observations.
+
+Offline mode continues to use cached tiles. Uncached areas render a neutral
+blank tile rather than causing an external request. Local assets and aircraft
+metadata remain available.
+
+On migration, the old combined adsb.lol value is copied to the new upload and
+remote-poll settings to preserve that explicit choice. Route lookups and map
+downloads are opt-in; this avoids adding hidden traffic to local-first systems.
+The legacy database column and API names remain for compatibility.
+
+## Receiver installation
+
+The deployed Raspberry Pi uses the existing `/usr/local/bin/readsb`, built
+from upstream's `stale` branch with `make -j1 RTLSDR=yes`. Keep the service
+override pointing to that binary. Do not run an automatic receiver installer
+or replace this working build while deploying FlightRadar changes.
+
+For a new Debian/Ubuntu receiver only, a packaged installation can be tried:
 
 The receiver computer is not assumed to be preconfigured. On a Debian/Ubuntu
 system where the package is available:
@@ -135,17 +163,62 @@ them directly to the internet.
 
 ## Optional adsb.lol integration
 
-The **Use adsb.lol** switch is in the Coords dialog. When enabled, the app
-retrieves public aircraft every 30 seconds. When the local receiver is also
-enabled, it starts a `readsb --net-only` relay from the configured Beast
-host/port to adsb.lol. A stable station UUID is stored in
+Uploading and remote retrieval have separate switches in the Coords dialog.
+When upload and the local receiver are enabled, the app starts a
+`readsb --net-only` relay from the configured Beast host/port to adsb.lol. A
+stable station UUID is stored in
 `.runtime/adsblol_station_uuid`, and relay output is appended to
 `.runtime/adsblol-feeder.log`.
 
 The Flask backend itself must have `readsb` installed even when the USB receiver
-is attached to a different computer. Disabling either switch stops the relay;
-disabling **Use adsb.lol** also stops public API polling. Integration is off by
-default.
+is attached to a different computer. Disabling upload, the local receiver, or
+enabling offline mode stops the relay. Integration is off by default.
+
+## Resource bounds and diagnostics
+
+Aircraft observations remain live at one-second cadence. Trail samples are
+recorded at most every five seconds, retained for one hour, pruned in batches,
+and limited to 360 returned points. Route work uses two background workers and
+a bounded queue. Successful and unavailable routes are cached by normalized
+callsign; transient failures back off instead of retrying on every detail poll.
+
+`GET /api/diagnostics` reports current aircraft/trail/cache sizes, external
+request outcomes, and route queue/cache/backoff counts. The browser prints one
+small frontend timing summary to its console per minute rather than logging
+every refresh.
+
+## Raspberry Pi deployment and validation
+
+These changes do not modify `readsb.service` or its receiver binary. After
+placing the updated repository on the Pi:
+
+```bash
+cd /path/to/FlightRadar
+. .venv/bin/activate
+python3 -m unittest discover -s tests -v
+python3 -m py_compile app.py adsblol.py database.py route_enrichment.py temp.py
+sudo systemctl restart adsb-radar.service
+sudo systemctl restart flight-kiosk.service
+systemctl --no-pager --full status adsb-radar.service flight-kiosk.service
+curl -fsS http://127.0.0.1:5000/api/diagnostics
+```
+
+For a rollback, preserve the current working tree as a patch before copying or
+pulling changes, then reverse that exact patch and restart only the two
+application services:
+
+```bash
+git diff --binary > ../flightradar-before-performance.patch
+# To reverse the applied performance patch later:
+git apply --reverse /path/to/performance.patch
+sudo systemctl restart adsb-radar.service flight-kiosk.service
+```
+
+First run a short comparison with similar aircraft counts, watching `vmstat 1`,
+zram use, touch response, and diagnostics. Then run a multi-hour soak on the
+same display. Desktop/unit tests cannot establish Pi/Cog memory or rendering
+behavior; browser footprint must settle and swap/I/O churn must be checked on
+the actual Zero 2 W.
 
 ## Aircraft filters
 
