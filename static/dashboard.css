@@ -33,6 +33,7 @@
     --accent: #d6a04b;
     --accent-soft: rgba(214, 160, 75, 0.12);
     --live: #82b88b;
+    --mode-controls-height: 48px;
 }
 
 * {
@@ -87,9 +88,13 @@ body {
 }
 
 .mode-controls {
-    flex: 0 0 48px;
+    flex: 0 0 var(--mode-controls-height);
+    height: var(--mode-controls-height);
+    min-height: var(--mode-controls-height);
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
     border-bottom: 1px solid var(--line);
     background: #0e0d0b;
 }
@@ -97,7 +102,11 @@ body {
 .mode-button {
     position: relative;
     display: inline-flex;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
     min-width: 0;
+    align-self: stretch;
     align-items: center;
     justify-content: center;
     gap: clamp(4px, 0.8vw, 7px);
@@ -111,6 +120,8 @@ body {
     text-transform: uppercase;
     white-space: nowrap;
     cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
     transition: color 120ms ease, background 120ms ease;
 }
 
@@ -1277,8 +1288,12 @@ body.constrained-device .airport-map-label {
 }
 
 @media (max-height: 540px) and (min-width: 721px) {
+    :root {
+        --mode-controls-height: 42px;
+    }
+
     .mode-controls {
-        flex-basis: 42px;
+        flex-basis: var(--mode-controls-height);
     }
 
     .range-controls {

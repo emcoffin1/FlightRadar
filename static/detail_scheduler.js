@@ -106,7 +106,10 @@
                 controller,
                 generation,
                 timeout: this.setTimeout(
-                    () => controller.abort(),
+                    () => {
+                        controller.signal.detailTimeout = true;
+                        controller.abort();
+                    },
                     this.requestTimeoutMs
                 )
             };

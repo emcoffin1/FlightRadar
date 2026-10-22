@@ -27,7 +27,13 @@ The receiver address accepts any of these forms:
 Local receiver JSON is enabled by default and polled every 1 second. Public
 adsb.lol retrieval uses `ADSB_LOL_POLL_SECONDS` in `config.py` (currently 10
 seconds). The local and public snapshots are merged by ICAO hex; fresh local
-position data wins while public metadata fills missing fields.
+metadata is preferred when present, while the freshest valid position wins.
+
+Remote requests run in one bounded background worker. A DNS failure, timeout,
+rate limit, authorization failure, or slow 15-second HTTP request therefore
+does not block the one-second local receiver loop. Only one remote request can
+be active, and results from obsolete coordinates/settings generations are
+discarded.
 
 ## Network and kiosk settings
 
@@ -36,6 +42,9 @@ The coordinate dialog persists these independent settings in `aircraft.db`:
 - **Use local receiver** reads the configured local/LAN `aircraft.json`.
 - **Upload to adsb.lol** relays local Beast data; it does not enable retrieval.
 - **Remote adsb.lol aircraft** polls the public point API; it does not upload.
+- **Remote endpoint** selects `auto`, the public point API, or feeder-only
+  re-api. `auto` prefers re-api only when local reception and this app's upload
+  relay are both enabled. Selecting `feeder` supports a feed managed elsewhere.
 - **External route lookup** permits background ADSBDB/HexDB lookups.
 - **Download map tiles** permits OpenStreetMap cache misses and revalidation.
 - **Offline mode** overrides every external option without disabling local data.
@@ -50,13 +59,41 @@ On migration, the old combined adsb.lol value is copied to the new upload and
 remote-poll settings to preserve that explicit choice. Route lookups and map
 downloads are opt-in; this avoids adding hidden traffic to local-first systems.
 The legacy database column and API names remain for compatibility.
+Migration adds the endpoint preference as `auto` without enabling upload or
+remote retrieval and without changing existing network choices.
+
+### Position and trail freshness
+
+All stored observation times are absolute UTC Unix seconds. Scheduling uses a
+monotonic clock. The initial centralized policy in `config.py` is:
+
+- up to 5 seconds future-clock tolerance;
+- source snapshots no older than 15 seconds;
+- messages and precise positions considered fresh for 20 seconds;
+- collector heartbeat considered healthy for 10 seconds;
+- remote snapshots cached for at most 30 seconds;
+- aircraft metadata retained for five minutes after its last message;
+- a new trail segment after a 120-second gap or an implied speed over 1500 kt.
+
+For native readsb data, message and position observation times are derived from
+the snapshot's `now` plus `seen` and `seen_pos`. Polling or writing SQLite never
+renews those times. A recent message cannot refresh old coordinates.
+`lastPosition` is historical and `rr_lat`/`rr_lon` are rough receiver-range
+estimates; neither is promoted to a live marker. The API also requires a fresh
+collector heartbeat, so Flask cannot serve stopped-collector records as live.
+
+Only the latest continuous trail segment is drawn. Historical database points
+remain bounded to one hour/360 points, but the UI will not draw a straight line
+across a long reception gap or implausible jump.
 
 ## Receiver installation
 
 The deployed Raspberry Pi uses the existing `/usr/local/bin/readsb`, built
 from upstream's `stale` branch with `make -j1 RTLSDR=yes`. Keep the service
 override pointing to that binary. Do not run an automatic receiver installer
-or replace this working build while deploying FlightRadar changes.
+or replace this working build while deploying FlightRadar changes. Its working
+aircraft database is `/usr/local/share/readsb/aircraft.csv.gz`; leave that file
+and `/etc/default/readsb` untouched during an application deployment.
 
 For a new Debian/Ubuntu receiver only, a packaged installation can be tried:
 
@@ -174,6 +211,24 @@ The Flask backend itself must have `readsb` installed even when the USB receiver
 is attached to a different computer. Disabling upload, the local receiver, or
 enabling offline mode stops the relay. Integration is off by default.
 
+The feeder-only re-api is the network's native readsb query endpoint and is
+requested geographically with `?circle=LATITUDE,LONGITUDE,RADIUS_NM`. Its
+documented access path authorizes the feeder station's public IP. A station UUID
+is not an API credential. adsb.lol advertises receiver API keys, but its public
+documentation does not specify an authentication header or parameter, so this
+application does not guess one. There is no automatic public fallback.
+
+All remote requests originate from the Flask backend. Viewing through Tailscale
+does not move those requests to the phone, although an exit node, different
+internet connection, or IPv4/IPv6 routing can change the backend's public IP and
+therefore feeder authorization. The re-api supplies aircraft observations, not
+routes/photos or a local MLAT installation.
+
+Retrieved re-api data is documented as ODbL 1.0. Data sent to the adsb.lol feed
+endpoints is covered by the service's separate CC0 upload terms. See the
+[re-api documentation](https://www.adsb.lol/docs/feeders-only/re-api/) and
+[privacy/license notice](https://www.adsb.lol/docs/privacy-license).
+
 ## Resource bounds and diagnostics
 
 Aircraft observations remain live at one-second cadence. Trail samples are
@@ -189,47 +244,75 @@ timeout, but a fallback provider is not started after permission is revoked.
 
 Malformed, expired, missing, or non-positive adsb.lol `Retry-After` values use
 a 60-second minimum delay. HTTP dates are converted with the wall clock before
-the duration is scheduled against the monotonic clock. Remote and local polling
-currently share one collector thread, so a slow remote request can still delay
-local collection for up to the remote request's 15-second timeout.
+the duration is scheduled against the monotonic clock. Remote HTTP work runs in
+its own single-worker executor, so a slow request does not delay the local
+one-second loop. An already-running remote request may still take up to its
+15-second timeout to finish after its setting is disabled; its obsolete result
+is rejected.
 
 `GET /api/diagnostics` reports current aircraft/trail/cache sizes, external
-request outcomes, and route queue/cache/backoff counts. The browser prints one
-small frontend timing summary to its console per minute rather than logging
-every refresh.
+request outcomes, collector heartbeat/receiver freshness, active remote
+provider and authorization status, snapshot ages/expiry, rejected positions,
+live/stale/historical counts, upload-relay state, route queue/cache/backoff,
+trail revision/segments/points, and rate-limited frontend detail failures. The
+browser prints and reports one small timing summary per minute rather than
+logging every refresh.
 
 ## Raspberry Pi deployment and validation
 
-These changes do not modify `readsb.service` or its receiver binary. After
-placing the updated repository on the Pi:
+These changes do not modify `readsb.service` or its receiver binary. Before
+switching revisions, record the current state and make a consistent SQLite
+backup while the application service is stopped:
 
 ```bash
 cd /path/to/FlightRadar
+git rev-parse HEAD
+git status --short
+git diff --binary > ../flightradar-before-upgrade.patch
+sudo systemctl stop adsb-radar.service
+sqlite3 aircraft.db '.backup ../aircraft-before-upgrade.db'
+```
+
+Switch to the reviewed commit, run its migrations/tests by starting it from the
+virtual environment, then restart only the application services. Leave
+`readsb.service`, `/etc/default/readsb`, and `/usr/local/bin/readsb` unchanged:
+
+```bash
+git switch --detach <review-commit>
 . .venv/bin/activate
 python3 -m unittest discover -s tests -v
-python3 -m py_compile app.py adsblol.py database.py route_enrichment.py temp.py
+python3 -m py_compile app.py adsblol.py database.py freshness.py \
+  local_receiver.py route_enrichment.py temp.py
 sudo systemctl restart adsb-radar.service
 sudo systemctl restart flight-kiosk.service
 systemctl --no-pager --full status adsb-radar.service flight-kiosk.service
 curl -fsS http://127.0.0.1:5000/api/diagnostics
 ```
 
-For a rollback, preserve the current working tree as a patch before copying or
-pulling changes, then reverse that exact patch and restart only the two
-application services:
+For a rollback, stop the application, restore both the recorded commit and the
+pre-migration database, then restart only the two application services:
 
 ```bash
-git diff --binary > ../flightradar-before-performance.patch
-# To reverse the applied performance patch later:
-git apply --reverse /path/to/performance.patch
+sudo systemctl stop adsb-radar.service
+git switch --detach <previous-commit>
+cp ../aircraft-before-upgrade.db aircraft.db
 sudo systemctl restart adsb-radar.service flight-kiosk.service
 ```
 
-First run a short comparison with similar aircraft counts, watching `vmstat 1`,
-zram use, touch response, and diagnostics. Then run a multi-hour soak on the
-same display. Desktop/unit tests cannot establish Pi/Cog memory or rendering
-behavior; browser footprint must settle and swap/I/O churn must be checked on
-the actual Zero 2 W.
+First run offline/local-only with constrained mode enabled. Verify aircraft
+movement, trail advancement, departures, full-height navigation touch targets,
+and stale removal by briefly stopping `readsb.service` while leaving the radar
+backend running. Restart readsb immediately after observing the stale
+transition. Then enable remote retrieval and test re-api from the Pi's actual
+network connection with the documented `curl --max-time 20` request. Compare
+diagnostics before/after failures and verify local timestamps continue to
+advance.
+
+Watch `free -h`, `swapon --show`, `zramctl`, and interval `vmstat 2` samples,
+while comparing touchscreen response with a phone view. Follow the supervised
+run with a multi-hour soak. Unit tests cannot establish Pi/Cog memory, Safari
+layout, re-api authorization, or rendering behavior; these remain hardware and
+network acceptance checks.
 
 ## Aircraft filters
 

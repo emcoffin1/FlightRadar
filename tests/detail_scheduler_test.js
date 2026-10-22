@@ -10,6 +10,14 @@ if (!loaded) {
     throw new Error(`Could not load ${schedulerPath}`);
 }
 (0, eval)(new TextDecoder().decode(schedulerBytes));
+const freshnessPath = GLib.build_filenamev([
+    GLib.get_current_dir(), "static", "freshness_state.js"
+]);
+const [freshnessLoaded, freshnessBytes] = GLib.file_get_contents(freshnessPath);
+if (!freshnessLoaded) {
+    throw new Error(`Could not load ${freshnessPath}`);
+}
+(0, eval)(new TextDecoder().decode(freshnessBytes));
 
 function assert(condition, message) {
     if (!condition) {
@@ -200,8 +208,65 @@ async function testCallsignChangeRefreshesImmediately() {
         "callsign refresh used stale selection details");
 }
 
+function testSnapshotFreshnessAndTrailRevision() {
+    let now = 100000;
+    const guard = new AircraftSnapshotGuard({
+        positionFreshMs: 20000,
+        failureGraceMs: 15000,
+        now: () => now
+    });
+    const fresh = {
+        hex: "aaa111",
+        position_observed_at: 99,
+        position_fresh: true
+    };
+    assert(guard.accept([fresh], true).length === 1,
+        "fresh aircraft was rejected");
+    now += 14000;
+    assert(!guard.failed(), "one transient failure expired markers too early");
+    now += 1001;
+    assert(guard.failed(), "repeated snapshot failures did not expire markers");
+
+    now = 200000;
+    const old = {
+        hex: "old111",
+        position_observed_at: 150,
+        position_fresh: true
+    };
+    assert(guard.accept([old], true).length === 0,
+        "successful response revived old position data");
+    assert(guard.accept([fresh], false).length === 0,
+        "stale collector heartbeat was treated as fresh data");
+
+    const base = {
+        hex: "aaa111",
+        trail_segment_id: 2,
+        trail_revision: 5,
+        path: [
+            { recorded_at: 1, lat: 1, lon: 1, segment_id: 2 },
+            { recorded_at: 2, lat: 2, lon: 2, segment_id: 2 },
+            { recorded_at: 3, lat: 3, lon: 3, segment_id: 2 }
+        ]
+    };
+    const changedInterior = {
+        ...base,
+        path: [base.path[0], { ...base.path[1], lat: 2.5 }, base.path[2]]
+    };
+    assert(
+        aircraftTrailSignature(base) !== aircraftTrailSignature(changedInterior),
+        "interior trail changes were not detected"
+    );
+    assert(
+        aircraftTrailSignature(base) !== aircraftTrailSignature({
+            hex: "aaa111", trail_segment_id: 2, trail_revision: 6, path: []
+        }),
+        "an empty replacement path did not invalidate the old trail"
+    );
+}
+
 await testPeriodicStatusesAndNoOverlap();
 await testFailureAndTimeoutRetry();
 await testVisibilitySelectionAndStaleResults();
 await testCallsignChangeRefreshesImmediately();
+testSnapshotFreshnessAndTrailRevision();
 print("detail scheduler behavioral tests passed");

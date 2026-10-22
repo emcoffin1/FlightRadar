@@ -418,18 +418,47 @@ class CollectorAndHistoryTests(unittest.TestCase):
             "destination_name": None,
         }
 
+    def receiver_payload(self, now=None):
+        now = time.time() if now is None else now
+        aircraft = self.aircraft()
+        aircraft.update({
+            "seen": 0,
+            "seen_pos": 0,
+            "_message_observed_at": now,
+            "_position_observed_at": now,
+            "_snapshot_generated_at": now,
+            "_source_fetched_at": now,
+            "_source": "local",
+        })
+        return {
+            "ac": [aircraft],
+            "now": now,
+            "source_fetched_at": now,
+            "source": "local",
+        }
+
     def test_history_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
             database = collector.Database(Path(directory) / "history.db")
             timestamps = [1000 + index * 6 for index in range(HISTORY_MAX_POINTS + 20)]
             with patch.object(collector, "time", side_effect=timestamps):
                 for index in range(len(timestamps)):
-                    database.update_ac([self.aircraft(33.5 + index * 0.0001)])
+                    aircraft = self.aircraft(33.5 + index * 0.0001)
+                    aircraft.update({
+                        "message_observed_at": timestamps[index],
+                        "position_observed_at": timestamps[index],
+                        "snapshot_generated_at": timestamps[index],
+                        "source_fetched_at": timestamps[index],
+                        "source": "local",
+                        "position_source": "local",
+                    })
+                    database.update_ac([aircraft])
             with database.connect() as conn:
                 count = conn.execute(
                     "SELECT COUNT(*) FROM aircraft_positions"
                 ).fetchone()[0]
         # Pruning is intentionally batched once per minute to reduce writes.
+        self.assertGreater(count, 0)
         self.assertLessEqual(count, HISTORY_MAX_POINTS + 10)
 
     def test_returned_trail_is_bounded_and_chronological(self):
@@ -453,11 +482,13 @@ class CollectorAndHistoryTests(unittest.TestCase):
                 return connect_database(path, rows=rows)
 
             with patch.object(web_app, "connect_database", isolated_connection):
-                trail = web_app.get_aircraft_path("abc123")
+                trail, segment_id, revision = web_app.get_aircraft_path("abc123")
 
         self.assertEqual(len(trail), HISTORY_MAX_POINTS)
         self.assertEqual(trail[0]["recorded_at"], 40)
         self.assertEqual(trail[-1]["recorded_at"], HISTORY_MAX_POINTS + 39)
+        self.assertEqual(segment_id, 1)
+        self.assertGreater(revision, 0)
 
     def test_remote_failure_does_not_drop_local_collection(self):
         class FakeDatabase:
@@ -475,7 +506,7 @@ class CollectorAndHistoryTests(unittest.TestCase):
                 self.updated = data
 
         fake_database = FakeDatabase()
-        local_payload = {"ac": [self.aircraft()]}
+        local_payload = self.receiver_payload()
         adsb = ADSB_LOL(lat=33.5, lon=-117.1)
         adsb.GET_point = Mock(side_effect=requests.ConnectionError("offline"))
         with (
@@ -493,6 +524,60 @@ class CollectorAndHistoryTests(unittest.TestCase):
 
         self.assertEqual(len(fake_database.updated), 1)
         self.assertEqual(fake_database.updated[0]["hex"], "abc123")
+
+    def test_slow_remote_request_does_not_block_collector_iterations(self):
+        started = Event()
+        release = Event()
+        updates = []
+
+        class FakeDatabase:
+            def get_collection_settings(self):
+                return (True, True, 50, 33.5, -117.1, True, "local", 30005,
+                        False, True, False, "public")
+
+            def enrich_local_aircraft(self, payload):
+                return payload
+
+            def update_ac(self, data, authoritative_sources=None):
+                updates.append(data)
+
+            def update_collector_status(self, **_values):
+                pass
+
+        def slow_remote(*_args, **_kwargs):
+            started.set()
+            release.wait()
+            return []
+
+        adsb = ADSB_LOL(lat=33.5, lon=-117.1)
+        adsb.GET_point = Mock(side_effect=slow_remote)
+        sleeps = [0]
+
+        def yield_to_worker(_seconds):
+            sleeps[0] += 1
+            if sleeps[0] == 1:
+                self.assertTrue(started.wait(1))
+
+        try:
+            with (
+                patch.object(collector, "Database", return_value=FakeDatabase()),
+                patch.object(
+                    collector.LocalReceiver,
+                    "get_aircraft",
+                    return_value=self.receiver_payload(),
+                ),
+                patch.object(collector.ADSBLolFeeder, "sync"),
+            ):
+                collector.run_collector(
+                    adsb,
+                    max_iterations=3,
+                    sleeper=yield_to_worker,
+                )
+        finally:
+            release.set()
+
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(adsb.GET_point.call_count, 1)
 
     def test_rate_limit_headers_defer_remote_and_preserve_local_iterations(self):
         from datetime import datetime, timezone
@@ -547,7 +632,7 @@ class CollectorAndHistoryTests(unittest.TestCase):
                     patch.object(
                         collector.LocalReceiver,
                         "get_aircraft",
-                        return_value={"ac": [self.aircraft()]},
+                        return_value=self.receiver_payload(wall_now),
                     ),
                     patch.object(collector.ADSBLolFeeder, "sync"),
                 ):
@@ -588,7 +673,7 @@ class CollectorAndHistoryTests(unittest.TestCase):
             patch.object(
                 collector.LocalReceiver,
                 "get_aircraft",
-                return_value={"ac": [self.aircraft()]},
+                return_value=self.receiver_payload(1_800_000_000),
             ),
             patch.object(collector.ADSBLolFeeder, "sync"),
         ):
@@ -601,7 +686,9 @@ class CollectorAndHistoryTests(unittest.TestCase):
                     0, monotonic_now[0] + seconds
                 ),
             )
-        self.assertEqual(adsb.GET_point.call_count, 2)
+        # The bounded worker is still completing the first error while local
+        # iterations advance; it never launches an overlapping/tight retry.
+        self.assertEqual(adsb.GET_point.call_count, 1)
 
     def test_upload_alone_does_not_enable_remote_polling(self):
         class FakeDatabase:
@@ -624,7 +711,7 @@ class CollectorAndHistoryTests(unittest.TestCase):
             patch.object(
                 collector.LocalReceiver,
                 "get_aircraft",
-                return_value={"ac": [self.aircraft()]},
+                return_value=self.receiver_payload(),
             ),
             patch.object(collector.ADSBLolFeeder, "sync", feeder_sync),
             patch.object(collector, "sleep", side_effect=StopIteration),
@@ -656,7 +743,7 @@ class CollectorAndHistoryTests(unittest.TestCase):
             patch.object(
                 collector.LocalReceiver,
                 "get_aircraft",
-                return_value={"ac": [self.aircraft()]},
+                return_value=self.receiver_payload(),
             ),
             patch.object(collector.ADSBLolFeeder, "sync", feeder_sync),
             patch.object(collector, "sleep", side_effect=StopIteration),
@@ -691,6 +778,19 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("marker.aircraftIconKey !== iconKey", javascript)
         self.assertIn("if (document.hidden || aircraftRefreshInFlight)", javascript)
         self.assertIn("body.constrained-device .leaflet-tile-pane", css)
+
+    def test_navigation_height_contract_covers_full_button_hit_area(self):
+        root = Path(__file__).resolve().parents[1]
+        css = (root / "static" / "dashboard.css").read_text()
+        page = (root / "templates" / "index.html").read_text()
+        self.assertIn("--mode-controls-height: 48px", css)
+        self.assertIn("height: var(--mode-controls-height)", css)
+        self.assertIn("grid-template-rows: minmax(0, 1fr)", css)
+        self.assertIn("height: 100%", css)
+        self.assertIn("align-self: stretch", css)
+        self.assertIn("-webkit-appearance: none", css)
+        self.assertIn("--mode-controls-height: 42px", css)
+        self.assertEqual(page.count('class="mode-button'), 3)
 
 
 if __name__ == "__main__":
