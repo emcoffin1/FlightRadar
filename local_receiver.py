@@ -11,6 +11,13 @@ import uuid
 
 import requests
 
+from config import (
+    MESSAGE_FRESH_SECONDS,
+    POSITION_FRESH_SECONDS,
+    SOURCE_SNAPSHOT_MAX_AGE_SECONDS,
+)
+from freshness import is_fresh, observation_time, valid_absolute_time
+
 
 LOGGER = logging.getLogger("adsb_display.receiver")
 DEFAULT_REMOTE_JSON_PATH = "/readsb/aircraft.json"
@@ -59,22 +66,64 @@ class LocalReceiver:
             response = requests.get(location, timeout=self.timeout)
             response.raise_for_status()
             payload = response.json()
+        fetched_at = time.time()
 
-        generated_at = float(payload.get("now", 0))
-        if generated_at and abs(time.time() - generated_at) > 15:
+        generated_at = valid_absolute_time(payload.get("now"), now=fetched_at)
+        if generated_at is None:
+            raise ValueError("readsb aircraft.json has an invalid timestamp")
+        if fetched_at - generated_at > SOURCE_SNAPSHOT_MAX_AGE_SECONDS:
             raise ValueError("readsb aircraft.json is stale")
 
         aircraft = payload.get("aircraft")
         if not isinstance(aircraft, list):
             raise ValueError("readsb JSON does not contain an aircraft list")
 
-        # Ignore contacts readsb has not heard recently. Position age is
-        # handled separately by the formatter, which omits missing positions.
+        normalized = []
+        for raw in aircraft:
+            if not isinstance(raw, dict):
+                continue
+            message_observed_at = observation_time(
+                generated_at,
+                raw.get("seen"),
+                fetched_at=fetched_at,
+            )
+            if not is_fresh(
+                message_observed_at,
+                MESSAGE_FRESH_SECONDS,
+                now=fetched_at,
+            ):
+                continue
+
+            item = dict(raw)
+            item["_message_observed_at"] = message_observed_at
+            item["_snapshot_generated_at"] = generated_at
+            item["_source_fetched_at"] = fetched_at
+            item["_source"] = "local"
+
+            position_observed_at = observation_time(
+                generated_at,
+                item.get("seen_pos"),
+                fetched_at=fetched_at,
+            )
+            has_precise_position = "lat" in item and "lon" in item
+            if not has_precise_position or not is_fresh(
+                position_observed_at,
+                POSITION_FRESH_SECONDS,
+                now=fetched_at,
+            ):
+                # lastPosition and rr_lat/rr_lon remain metadata only. They
+                # are never promoted into the live-position fields.
+                item.pop("lat", None)
+                item.pop("lon", None)
+                position_observed_at = None
+            item["_position_observed_at"] = position_observed_at
+            normalized.append(item)
+
         return {
-            "ac": [
-                item for item in aircraft
-                if isinstance(item, dict) and float(item.get("seen", 999)) < 15
-            ]
+            "ac": normalized,
+            "now": generated_at,
+            "source_fetched_at": fetched_at,
+            "source": "local",
         }
 
 

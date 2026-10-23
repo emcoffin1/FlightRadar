@@ -361,9 +361,26 @@
                         >
                         <span>
                             <strong>Remote adsb.lol aircraft</strong>
-                            <small>Poll the public point API independently</small>
+                            <small>Poll the selected geographic endpoint independently</small>
                         </span>
                     </label>
+
+                    <div class="coordinate-field">
+                        <label for="remote-endpoint-preference">Remote endpoint</label>
+                        <select
+                            class="coordinate-input"
+                            id="remote-endpoint-preference"
+                            name="remote_endpoint_preference"
+                        >
+                            <option value="auto">Auto (feeder when uploading)</option>
+                            <option value="feeder">Feeder re-api</option>
+                            <option value="public">Public point API</option>
+                        </select>
+                        <p class="receiver-help">
+                            Feeder re-api authorization follows the backend's
+                            public IP. Public fallback is never automatic.
+                        </p>
+                    </div>
 
                     <label class="dialog-switch" for="route-enrichment-enabled">
                         <input
@@ -431,14 +448,20 @@
                 mapCenter: {{ map_center | tojson }},
                 searchRangeNm: {{ search_range_nm | tojson }},
                 aircraftRefreshMs: {{ aircraft_refresh_ms | tojson }},
+                aircraftDetailRefreshMs: {{ aircraft_detail_refresh_ms | tojson }},
+                positionFreshMs: {{ position_fresh_ms | tojson }},
+                snapshotFailureGraceMs: {{ snapshot_failure_grace_ms | tojson }},
                 allAircraftUrl: {{ url_for('get_all_aircraft') | tojson }},
                 airportsUrl: {{ url_for('get_airports') | tojson }},
                 aircraftDetailUrlTemplate: {{ url_for('get_aircraft', aircraft_hex='__HEX__') | tojson }},
                 modeSettingsUrl: {{ url_for('mode_settings') | tojson }},
                 coordinateSettingsUrl: {{ url_for('coordinate_settings') | tojson }},
+                frontendDiagnosticsUrl: {{ frontend_diagnostics_url | tojson }},
                 constrainedProfile: {{ constrained_profile_enabled | tojson }}
             };
         </script>
+        <script src="{{ url_for('static', filename='freshness_state.js') }}"></script>
+        <script src="{{ url_for('static', filename='detail_scheduler.js') }}"></script>
         <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
     </body>
 </html>

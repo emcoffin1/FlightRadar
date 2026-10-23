@@ -16,6 +16,7 @@ from config import (
     DEFAULT_LON,
     DEFAULT_RECEIVER_ADDRESS,
     DEFAULT_RECEIVER_BEAST_PORT,
+    DEFAULT_REMOTE_ENDPOINT_PREFERENCE,
     DEFAULT_REMOTE_AIRCRAFT_ENABLED,
     DEFAULT_ROUTE_ENRICHMENT_ENABLED,
     DEFAULT_SEARCH_RANGE,
@@ -72,7 +73,14 @@ def ensure_aircraft_schema(conn, *, create_table=False):
                 destination TEXT,
                 destination_name TEXT,
                 route_lookup_complete INTEGER NOT NULL DEFAULT 0,
-                missed_updates INTEGER NOT NULL DEFAULT 0
+                missed_updates INTEGER NOT NULL DEFAULT 0,
+                message_observed_at REAL,
+                position_observed_at REAL,
+                snapshot_generated_at REAL,
+                source_fetched_at REAL,
+                collector_updated_at REAL,
+                source TEXT,
+                position_source TEXT
             )
         """)
 
@@ -97,6 +105,21 @@ def ensure_aircraft_schema(conn, *, create_table=False):
             "ALTER TABLE adsb_data "
             "ADD COLUMN missed_updates INTEGER NOT NULL DEFAULT 0"
         )
+
+    freshness_columns = {
+        "message_observed_at": "REAL",
+        "position_observed_at": "REAL",
+        "snapshot_generated_at": "REAL",
+        "source_fetched_at": "REAL",
+        "collector_updated_at": "REAL",
+        "source": "TEXT",
+        "position_source": "TEXT",
+    }
+    for name, column_type in freshness_columns.items():
+        if name not in columns:
+            conn.execute(
+                f"ALTER TABLE adsb_data ADD COLUMN {name} {column_type}"
+            )
 
     route_names_added = False
     if "departure_name" not in columns:
@@ -143,6 +166,7 @@ def ensure_aircraft_schema(conn, *, create_table=False):
             recorded_at REAL NOT NULL,
             lat REAL NOT NULL,
             lon REAL NOT NULL,
+            segment_id INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY (aircraft_id)
                 REFERENCES adsb_data(id)
                 ON DELETE CASCADE
@@ -152,6 +176,15 @@ def ensure_aircraft_schema(conn, *, create_table=False):
         CREATE INDEX IF NOT EXISTS idx_aircraft_positions_aircraft_time
         ON aircraft_positions (aircraft_id, recorded_at)
     """)
+    position_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(aircraft_positions)").fetchall()
+    }
+    if "segment_id" not in position_columns:
+        conn.execute(
+            "ALTER TABLE aircraft_positions "
+            "ADD COLUMN segment_id INTEGER NOT NULL DEFAULT 1"
+        )
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_aircraft_positions_aircraft_id
         ON aircraft_positions (aircraft_id, id DESC)
@@ -178,6 +211,39 @@ def ensure_aircraft_schema(conn, *, create_table=False):
             retry_after REAL,
             updated_at REAL NOT NULL
         )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS collector_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            heartbeat_at REAL,
+            local_snapshot_generated_at REAL,
+            local_fetched_at REAL,
+            local_error TEXT,
+            remote_provider TEXT,
+            remote_last_success_at REAL,
+            remote_snapshot_generated_at REAL,
+            remote_next_retry_at REAL,
+            remote_status TEXT NOT NULL DEFAULT 'disabled',
+            remote_error TEXT,
+            local_message_fresh_count INTEGER NOT NULL DEFAULT 0,
+            local_position_fresh_count INTEGER NOT NULL DEFAULT 0,
+            remote_message_fresh_count INTEGER NOT NULL DEFAULT 0,
+            remote_position_fresh_count INTEGER NOT NULL DEFAULT 0,
+            rejected_stale_positions INTEGER NOT NULL DEFAULT 0,
+            upload_relay_running INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    status_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(collector_status)").fetchall()
+    }
+    if "upload_relay_running" not in status_columns:
+        conn.execute(
+            "ALTER TABLE collector_status ADD COLUMN upload_relay_running "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute("""
+        INSERT OR IGNORE INTO collector_status (id) VALUES (1)
     """)
 
 
@@ -296,7 +362,8 @@ def ensure_mode_settings(conn):
             offline_mode_enabled INTEGER NOT NULL DEFAULT 0,
             constrained_profile_enabled INTEGER NOT NULL DEFAULT 1,
             network_settings_migrated INTEGER NOT NULL DEFAULT 1,
-            local_default_applied INTEGER NOT NULL DEFAULT 1
+            local_default_applied INTEGER NOT NULL DEFAULT 1,
+            remote_endpoint_preference TEXT NOT NULL DEFAULT 'auto'
         )
     """)
 
@@ -368,6 +435,17 @@ def ensure_mode_settings(conn):
                 f"INTEGER NOT NULL DEFAULT {default}"
             )
 
+    if "remote_endpoint_preference" not in columns:
+        conn.execute(
+            "ALTER TABLE app_settings ADD COLUMN remote_endpoint_preference "
+            f"TEXT NOT NULL DEFAULT '{DEFAULT_REMOTE_ENDPOINT_PREFERENCE}'"
+        )
+    conn.execute("""
+        UPDATE app_settings
+        SET remote_endpoint_preference = ?
+        WHERE remote_endpoint_preference NOT IN ('auto', 'public', 'feeder')
+    """, (DEFAULT_REMOTE_ENDPOINT_PREFERENCE,))
+
     if "network_settings_migrated" not in columns:
         conn.execute(
             "ALTER TABLE app_settings ADD COLUMN network_settings_migrated "
@@ -423,8 +501,9 @@ def ensure_mode_settings(conn):
             offline_mode_enabled,
             constrained_profile_enabled,
             network_settings_migrated,
-            local_default_applied
-        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+            local_default_applied,
+            remote_endpoint_preference
+        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
     """, (
         DEFAULT_LAT,
         DEFAULT_LON,
@@ -439,4 +518,5 @@ def ensure_mode_settings(conn):
         int(DEFAULT_EXTERNAL_TILES_ENABLED),
         0,
         int(DEFAULT_CONSTRAINED_PROFILE_ENABLED),
+        DEFAULT_REMOTE_ENDPOINT_PREFERENCE,
     ))

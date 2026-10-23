@@ -63,7 +63,9 @@ class LocalDataTests(unittest.TestCase):
 
     def test_readsb_aircraft_format_matches_existing_api_shape(self):
         client = ADSB_LOL(lat=33.77, lon=-118.12)
+        now = time.time()
         result = client._filter_format({
+            "now": now,
             "ac": [{
                 "hex": "ae1234",
                 "flight": "RCH123 ",
@@ -73,6 +75,8 @@ class LocalDataTests(unittest.TestCase):
                 "track": 90,
                 "gs": 310,
                 "dbFlags": 1,
+                "seen": 0.1,
+                "seen_pos": 0.2,
             }],
         }, max_range=50)
 
@@ -85,10 +89,12 @@ class LocalDataTests(unittest.TestCase):
         remote = [{
             "hex": "abc123", "lat": 1, "lon": 2, "t": "C17",
             "r": "01-0001", "flag": ["Military"],
+            "position_observed_at": 100,
         }]
         local = [{
             "hex": "abc123", "lat": 3, "lon": 4, "t": "NA",
             "r": "NA", "flag": ["NA"],
+            "position_observed_at": 200,
         }]
         result = merge_aircraft(remote, local)[0]
         self.assertEqual((result["lat"], result["lon"]), (3, 4))
@@ -124,6 +130,7 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(row["receiver_beast_port"], 30005)
         self.assertTrue(row["local_receiver_enabled"])
         self.assertFalse(row["adsblol_feed_enabled"])
+        self.assertEqual(row["remote_endpoint_preference"], "auto")
 
     def test_coordinate_api_preserves_receiver_settings_for_old_clients(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -214,6 +221,41 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(settings["lat"], before["center_lat"])
         self.assertEqual(settings["lon"], before["center_lon"])
 
+    def test_coordinate_api_persists_remote_endpoint_preference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api.db"
+            with connect_database(path) as connection:
+                ensure_mode_settings(connection)
+
+            def isolated_connection(*, rows=False):
+                return connect_database(path, rows=rows)
+
+            with patch.object(web_app, "connect_database", isolated_connection):
+                response = web_app.app.test_client().patch(
+                    "/api/settings/coordinates",
+                    json={"remote_endpoint_preference": "feeder"},
+                )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["remote_endpoint_preference"], "feeder"
+        )
+
+    def test_coordinate_api_rejects_unknown_remote_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api.db"
+            with connect_database(path) as connection:
+                ensure_mode_settings(connection)
+
+            def isolated_connection(*, rows=False):
+                return connect_database(path, rows=rows)
+
+            with patch.object(web_app, "connect_database", isolated_connection):
+                response = web_app.app.test_client().patch(
+                    "/api/settings/coordinates",
+                    json={"remote_endpoint_preference": "fallback-magic"},
+                )
+        self.assertEqual(response.status_code, 400)
+
     def test_dashboard_renders_receiver_controls_and_one_second_refresh(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "api.db"
@@ -232,6 +274,7 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertIn('id="adsblol-upload-enabled"', page)
         self.assertIn('id="remote-aircraft-enabled"', page)
         self.assertIn('id="route-enrichment-enabled"', page)
+        self.assertIn('id="remote-endpoint-preference"', page)
         self.assertIn('id="external-tiles-enabled"', page)
         self.assertIn('id="offline-mode-enabled"', page)
         self.assertIn('id="coordinate-lat"', page)
@@ -240,6 +283,11 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertIn('inputmode="decimal"', page)
         self.assertNotIn('name="lat"\n                            type="number"', page)
         self.assertIn("aircraftRefreshMs: 1000", page)
+        self.assertIn("aircraftDetailRefreshMs: 7000", page)
+        self.assertLess(
+            page.index("detail_scheduler.js"),
+            page.index("dashboard.js"),
+        )
 
 
 class AircraftMetadataTests(unittest.TestCase):

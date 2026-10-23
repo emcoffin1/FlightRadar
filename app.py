@@ -47,9 +47,14 @@ from database import (
 from local_receiver import receiver_json_location
 from route_enrichment import RouteLookupCoordinator
 from config import (
+    AIRCRAFT_DETAIL_REFRESH_SECONDS,
     AIRCRAFT_REFRESH_SECONDS,
+    COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS,
+    FRONTEND_SNAPSHOT_FAILURE_GRACE_SECONDS,
     AIRPORT_DATA_PATH,
     MAX_TILE_RADIUS_NM,
+    POSITION_FRESH_SECONDS,
+    SOURCE_SNAPSHOT_MAX_AGE_SECONDS,
     HISTORY_MAX_POINTS,
     OSM_TILE_URL,
     OSM_TILE_USER_AGENT,
@@ -66,9 +71,28 @@ LOGGER = logging.getLogger("adsb_display")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 adsb_client = ADSB_LOL()
-route_coordinator = RouteLookupCoordinator(adsb_client.GET_flight_info)
+route_coordinator = None
+
+
+def lookup_aircraft_route(callsign, aircraft_hex):
+    return adsb_client.GET_flight_info(
+        callsign,
+        aircraft_hex,
+        permission_check=route_coordinator.is_external_enabled,
+    )
+
+
+route_coordinator = RouteLookupCoordinator(lookup_aircraft_route)
 collector_thread = None
 airport_data_lock = Lock()
+frontend_diagnostics_lock = Lock()
+frontend_diagnostics_state = {
+    "reported_at": None,
+    "selected_detail_failures": 0,
+    "trail_revision": 0,
+    "trail_segment_count": 0,
+    "trail_point_count": 0,
+}
 external_request_counts = Counter()
 TRANSPARENT_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
@@ -366,11 +390,30 @@ def serialize_aircraft(row):
     if is_helicopter and aircraft["aircraft_image"] is None:
         aircraft["aircraft_image"] = aircraft_image_url("R44")
     aircraft["is_private"] = is_private_aircraft(aircraft)
+    observed_at = aircraft.get("position_observed_at")
+    aircraft["position_age_seconds"] = (
+        None if observed_at is None
+        else max(0, time.time() - float(observed_at))
+    )
+    aircraft["position_fresh"] = (
+        observed_at is not None
+        and aircraft["position_age_seconds"] <= POSITION_FRESH_SECONDS
+    )
     return aircraft
 
 
 def get_aircraft_by_hex(aircraft_hex):
+    now = time.time()
     with connect_database(rows=True) as conn:
+        status = conn.execute(
+            "SELECT heartbeat_at FROM collector_status WHERE id = 1"
+        ).fetchone()
+        if (
+            status is None
+            or status["heartbeat_at"] is None
+            or now - float(status["heartbeat_at"]) > COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
+        ):
+            return None
         aircraft = conn.execute("""
             SELECT
                 hex,
@@ -392,31 +435,61 @@ def get_aircraft_by_hex(aircraft_hex):
                 departure_name,
                 destination,
                 destination_name,
-                route_lookup_complete
+                route_lookup_complete,
+                message_observed_at,
+                position_observed_at,
+                snapshot_generated_at,
+                source_fetched_at,
+                collector_updated_at,
+                source,
+                position_source
             FROM adsb_data
             WHERE lower(hex) = lower(?)
+                AND position_observed_at >= ?
             LIMIT 1
-        """, (aircraft_hex,)).fetchone()
+        """, (aircraft_hex, now - POSITION_FRESH_SECONDS)).fetchone()
 
     return aircraft
 
 
 def get_aircraft_path(aircraft_hex):
     with connect_database(rows=True) as conn:
+        latest = conn.execute("""
+            SELECT aircraft_positions.segment_id,
+                MAX(aircraft_positions.id) AS revision
+            FROM aircraft_positions
+            JOIN adsb_data ON adsb_data.id = aircraft_positions.aircraft_id
+            WHERE lower(adsb_data.hex) = lower(?)
+            GROUP BY aircraft_positions.segment_id
+            ORDER BY aircraft_positions.segment_id DESC
+            LIMIT 1
+        """, (aircraft_hex,)).fetchone()
+        if latest is None:
+            return [], None, 0
         positions = conn.execute("""
             SELECT
                 aircraft_positions.recorded_at,
                 aircraft_positions.lat,
-                aircraft_positions.lon
+                aircraft_positions.lon,
+                aircraft_positions.segment_id
             FROM aircraft_positions
             JOIN adsb_data
                 ON adsb_data.id = aircraft_positions.aircraft_id
             WHERE lower(adsb_data.hex) = lower(?)
+                AND aircraft_positions.segment_id = ?
             ORDER BY aircraft_positions.recorded_at DESC
             LIMIT ?
-        """, (aircraft_hex, HISTORY_MAX_POINTS)).fetchall()
+        """, (
+            aircraft_hex,
+            latest["segment_id"],
+            HISTORY_MAX_POINTS,
+        )).fetchall()
 
-    return [dict(position) for position in reversed(positions)]
+    return (
+        [dict(position) for position in reversed(positions)],
+        int(latest["segment_id"]),
+        int(latest["revision"]),
+    )
 
 
 def resolve_aircraft_route(aircraft):
@@ -475,6 +548,7 @@ def serialize_coordinates(row):
         "receiver_beast_port": int(row["receiver_beast_port"]),
         "adsblol_upload_enabled": upload_enabled,
         "remote_aircraft_enabled": remote_enabled,
+        "remote_endpoint_preference": row["remote_endpoint_preference"],
         "route_enrichment_enabled": bool(row["route_enrichment_enabled"]),
         "external_tiles_enabled": bool(row["external_tiles_enabled"]),
         "offline_mode_enabled": bool(row["offline_mode_enabled"]),
@@ -713,6 +787,13 @@ def hello_world():
     return render_template(
         "index.html",
         aircraft_refresh_ms=int(AIRCRAFT_REFRESH_SECONDS * 1000),
+        aircraft_detail_refresh_ms=int(
+            AIRCRAFT_DETAIL_REFRESH_SECONDS * 1000
+        ),
+        position_fresh_ms=int(POSITION_FRESH_SECONDS * 1000),
+        snapshot_failure_grace_ms=int(
+            FRONTEND_SNAPSHOT_FAILURE_GRACE_SECONDS * 1000
+        ),
         map_center=[
             float(coordinates["center_lat"]),
             float(coordinates["center_lon"]),
@@ -721,6 +802,7 @@ def hello_world():
         constrained_profile_enabled=bool(
             coordinates["constrained_profile_enabled"]
         ),
+        frontend_diagnostics_url=url_for("frontend_diagnostics"),
     )
 
 
@@ -828,6 +910,7 @@ def get_airports():
 
 @app.route("/api/aircraft")
 def get_all_aircraft():
+    now = time.time()
     with connect_database(rows=True) as conn:
         display_range = conn.execute("""
             SELECT search_range_nm
@@ -846,17 +929,38 @@ def get_all_aircraft():
                 lon,
                 track,
                 gs,
-                category
+                category,
+                position_observed_at,
+                message_observed_at,
+                source,
+                position_source
             FROM adsb_data
             WHERE range IS NOT NULL
                 AND range <= ?
+                AND position_observed_at >= ?
             ORDER BY
                 CASE WHEN range IS NULL THEN 1 ELSE 0 END,
                 range ASC,
                 callsign ASC
-        """, (display_range,)).fetchall()
+        """, (display_range, now - POSITION_FRESH_SECONDS)).fetchall()
 
-    return jsonify([serialize_aircraft(row) for row in aircraft])
+        status = conn.execute("""
+            SELECT heartbeat_at FROM collector_status WHERE id = 1
+        """).fetchone()
+
+    collector_fresh = bool(
+        status and status["heartbeat_at"]
+        and now - float(status["heartbeat_at"]) <= COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
+    )
+    response = jsonify(
+        [serialize_aircraft(row) for row in aircraft] if collector_fresh else []
+    )
+    response.headers["X-Collector-Fresh"] = "1" if collector_fresh else "0"
+    response.headers["X-Collector-Heartbeat"] = (
+        str(status["heartbeat_at"]) if status and status["heartbeat_at"] else ""
+    )
+    response.headers["X-Response-Generated-At"] = str(now)
+    return response
 
 
 @app.route("/api/aircraft/<aircraft_hex>")
@@ -868,7 +972,10 @@ def get_aircraft(aircraft_hex):
 
     aircraft = resolve_aircraft_route(aircraft)
     serialized = serialize_aircraft(aircraft)
-    serialized["path"] = get_aircraft_path(aircraft_hex)
+    path, segment_id, revision = get_aircraft_path(aircraft_hex)
+    serialized["path"] = path
+    serialized["trail_segment_id"] = segment_id
+    serialized["trail_revision"] = revision
     return jsonify(serialized)
 
 
@@ -953,7 +1060,8 @@ def coordinate_settings():
                     route_enrichment_enabled,
                     external_tiles_enabled,
                     offline_mode_enabled,
-                    constrained_profile_enabled
+                    constrained_profile_enabled,
+                    remote_endpoint_preference
                 FROM app_settings
                 WHERE id = 1
             """).fetchone()
@@ -985,6 +1093,15 @@ def coordinate_settings():
             ):
                 if name in data and not isinstance(data[name], bool):
                     return jsonify({"error": f"{name} must be true or false"}), 400
+
+            endpoint_preference = data.get(
+                "remote_endpoint_preference",
+                current["remote_endpoint_preference"],
+            )
+            if endpoint_preference not in {"auto", "public", "feeder"}:
+                return jsonify({
+                    "error": "remote_endpoint_preference must be auto, public, or feeder"
+                }), 400
 
             receiver_address = str(data.get(
                 "receiver_address",
@@ -1046,7 +1163,8 @@ def coordinate_settings():
                     route_enrichment_enabled = ?,
                     external_tiles_enabled = ?,
                     offline_mode_enabled = ?,
-                    constrained_profile_enabled = ?
+                    constrained_profile_enabled = ?,
+                    remote_endpoint_preference = ?
                 WHERE id = 1
             """, (
                 latitude,
@@ -1076,6 +1194,7 @@ def coordinate_settings():
                     "constrained_profile_enabled",
                     bool(current["constrained_profile_enabled"]),
                 )),
+                endpoint_preference,
             ))
 
         coordinates = conn.execute("""
@@ -1090,16 +1209,22 @@ def coordinate_settings():
                 route_enrichment_enabled,
                 external_tiles_enabled,
                 offline_mode_enabled,
-                constrained_profile_enabled
+                constrained_profile_enabled,
+                remote_endpoint_preference
             FROM app_settings
             WHERE id = 1
         """).fetchone()
 
+    route_coordinator.set_external_enabled(
+        bool(coordinates["route_enrichment_enabled"])
+        and not bool(coordinates["offline_mode_enabled"])
+    )
     return jsonify(serialize_coordinates(coordinates))
 
 
 @app.route("/api/aircraft/closest")
 def get_closest_aircraft():
+    now = time.time()
     with connect_database(rows=True) as conn:
         display_range = conn.execute("""
             SELECT search_range_nm
@@ -1116,9 +1241,10 @@ def get_closest_aircraft():
                 AND lon != 0
                 AND range IS NOT NULL
                 AND range <= ?
+                AND position_observed_at >= ?
             ORDER BY range ASC
             LIMIT 1
-        """, (display_range,)).fetchone()
+        """, (display_range, now - POSITION_FRESH_SECONDS)).fetchone()
     if aircraft is None:
         return jsonify(None)
 
@@ -1128,6 +1254,7 @@ def get_closest_aircraft():
 
 @app.route("/api/diagnostics")
 def diagnostics():
+    now = time.time()
     with connect_database(rows=True) as conn:
         counts = conn.execute("""
             SELECT
@@ -1135,14 +1262,84 @@ def diagnostics():
                 (SELECT COUNT(*) FROM aircraft_positions) AS trail_points,
                 (SELECT COUNT(*) FROM route_cache) AS route_cache_entries
         """).fetchone()
+        collector = conn.execute("""
+            SELECT * FROM collector_status WHERE id = 1
+        """).fetchone()
+        freshness = conn.execute("""
+            SELECT
+                COALESCE(SUM(CASE WHEN position_observed_at >= ? THEN 1 ELSE 0 END), 0) AS live,
+                COALESCE(SUM(CASE WHEN position_observed_at < ? THEN 1 ELSE 0 END), 0) AS stale,
+                COALESCE(SUM(CASE WHEN position_observed_at IS NULL THEN 1 ELSE 0 END), 0) AS historical
+            FROM adsb_data
+        """, (
+            now - POSITION_FRESH_SECONDS,
+            now - POSITION_FRESH_SECONDS,
+        )).fetchone()
+        trail = conn.execute("""
+            SELECT MAX(id) AS revision,
+                COUNT(DISTINCT segment_id) AS segment_count,
+                COUNT(*) AS point_count
+            FROM aircraft_positions
+        """).fetchone()
+    collector_data = dict(collector) if collector else {}
+    heartbeat = collector_data.get("heartbeat_at")
+    collector_data["heartbeat_age_seconds"] = (
+        None if heartbeat is None else max(0, now - float(heartbeat))
+    )
+    collector_data["running"] = bool(
+        heartbeat is not None
+        and collector_data["heartbeat_age_seconds"] <= COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
+    )
+    remote_success = collector_data.get("remote_last_success_at")
+    collector_data["remote_snapshot_age_seconds"] = (
+        None if remote_success is None else max(0, now - float(remote_success))
+    )
+    local_fetched = collector_data.get("local_fetched_at")
+    collector_data["local_snapshot_age_seconds"] = (
+        None if local_fetched is None else max(0, now - float(local_fetched))
+    )
+    collector_data["receiver_fresh"] = bool(
+        local_fetched is not None
+        and collector_data["local_snapshot_age_seconds"]
+        <= SOURCE_SNAPSHOT_MAX_AGE_SECONDS
+    )
+    with frontend_diagnostics_lock:
+        frontend_data = dict(frontend_diagnostics_state)
     return jsonify({
         "database": dict(counts),
+        "freshness": dict(freshness),
+        "trail": dict(trail),
+        "collector": collector_data,
+        "frontend": frontend_data,
         "external_requests": {
             **adsb_client.request_diagnostics(),
             **dict(external_request_counts),
         },
         "route_lookup": route_coordinator.diagnostics(),
     })
+
+
+@app.route("/api/diagnostics/frontend", methods=["POST"])
+def frontend_diagnostics():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+    try:
+        selected_failures = max(0, int(data.get("selected_detail_failures", 0)))
+        trail_revision = max(0, int(data.get("trail_revision", 0)))
+        trail_segments = max(0, int(data.get("trail_segment_count", 0)))
+        trail_points = max(0, int(data.get("trail_point_count", 0)))
+    except (TypeError, ValueError, OverflowError):
+        return jsonify({"error": "Diagnostic counts must be integers"}), 400
+    with frontend_diagnostics_lock:
+        frontend_diagnostics_state.update({
+            "reported_at": time.time(),
+            "selected_detail_failures": selected_failures,
+            "trail_revision": trail_revision,
+            "trail_segment_count": trail_segments,
+            "trail_point_count": trail_points,
+        })
+    return jsonify({"ok": True})
 
 
 def initialize_application_database():
@@ -1152,6 +1349,16 @@ def initialize_application_database():
 
 
 initialize_application_database()
+with connect_database(rows=True) as conn:
+    initial_network_settings = conn.execute("""
+        SELECT route_enrichment_enabled, offline_mode_enabled
+        FROM app_settings
+        WHERE id = 1
+    """).fetchone()
+route_coordinator.set_external_enabled(
+    bool(initial_network_settings["route_enrichment_enabled"])
+    and not bool(initial_network_settings["offline_mode_enabled"])
+)
 
 
 if __name__ == "__main__":

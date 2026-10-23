@@ -2,11 +2,14 @@ const config = window.ADSB_DISPLAY_CONFIG;
 let currentCenter = [...config.mapCenter];
 let currentSearchRangeNm = config.searchRangeNm;
 const aircraftRefreshMs = config.aircraftRefreshMs;
+const positionFreshMs = Number(config.positionFreshMs) || 20000;
+const snapshotFailureGraceMs = Number(config.snapshotFailureGraceMs) || 15000;
 const allAircraftUrl = config.allAircraftUrl;
 const airportsUrl = config.airportsUrl;
 const aircraftDetailUrlTemplate = config.aircraftDetailUrlTemplate;
 const modeSettingsUrl = config.modeSettingsUrl;
 const coordinateSettingsUrl = config.coordinateSettingsUrl;
+const frontendDiagnosticsUrl = config.frontendDiagnosticsUrl;
 let constrainedProfile = Boolean(config.constrainedProfile);
 
 const httpErrorIndicator = document.getElementById("http-error-indicator");
@@ -350,6 +353,9 @@ const adsblolUploadInput = document.getElementById(
 const remoteAircraftInput = document.getElementById(
     "remote-aircraft-enabled"
 );
+const remoteEndpointPreferenceInput = document.getElementById(
+    "remote-endpoint-preference"
+);
 const routeEnrichmentInput = document.getElementById(
     "route-enrichment-enabled"
 );
@@ -490,6 +496,10 @@ function displayCoordinates(coordinates) {
         );
         ensureAnimationLoop();
     }
+    if (coordinates.remote_endpoint_preference !== undefined) {
+        remoteEndpointPreferenceInput.value =
+            coordinates.remote_endpoint_preference;
+    }
 }
 
 async function loadCoordinates() {
@@ -608,6 +618,7 @@ async function saveCoordinates(event) {
                 receiver_beast_port: Number(receiverBeastPortInput.value),
                 adsblol_upload_enabled: adsblolUploadInput.checked,
                 remote_aircraft_enabled: remoteAircraftInput.checked,
+                remote_endpoint_preference: remoteEndpointPreferenceInput.value,
                 route_enrichment_enabled: routeEnrichmentInput.checked,
                 external_tiles_enabled: externalTilesInput.checked,
                 offline_mode_enabled: offlineModeInput.checked,
@@ -772,15 +783,22 @@ let primaryRequestNumber = 0;
 let aircraftRefreshInFlight = false;
 let primaryPathHex = null;
 let primaryPathSignature = "";
+let primaryTrailRevision = 0;
+let primaryTrailSegmentId = null;
 let primaryDetailHex = null;
-let detailAbortController = null;
-let detailRefreshTimer = null;
+let selectedDetailFailures = 0;
+const snapshotGuard = new AircraftSnapshotGuard({
+    positionFreshMs,
+    failureGraceMs: snapshotFailureGraceMs
+});
 
 function clearPrimaryAircraftPath() {
     primaryPathOutline.setLatLngs([]);
     primaryPathLine.setLatLngs([]);
     primaryPathHex = null;
     primaryPathSignature = "";
+    primaryTrailRevision = 0;
+    primaryTrailSegmentId = null;
 }
 
 function displayPrimaryAircraftPath(aircraft) {
@@ -799,9 +817,7 @@ function displayPrimaryAircraftPath(aircraft) {
             longitude !== 0
         ));
 
-    const signature = path.length
-        ? `${path.length}:${path[0].join(",")}:${path.at(-1).join(",")}`
-        : "empty";
+    const signature = aircraftTrailSignature(aircraft);
 
     if (primaryPathHex === (aircraft && aircraft.hex) && (
         primaryPathSignature === signature
@@ -813,6 +829,8 @@ function displayPrimaryAircraftPath(aircraft) {
     primaryPathLine.setLatLngs(path);
     primaryPathHex = aircraft ? aircraft.hex : null;
     primaryPathSignature = signature;
+    primaryTrailRevision = Number(aircraft && aircraft.trail_revision) || 0;
+    primaryTrailSegmentId = aircraft && aircraft.trail_segment_id;
 }
 
 function clearPrimaryAircraft() {
@@ -826,12 +844,7 @@ function clearPrimaryAircraft() {
     clearPrimaryAircraftPath();
     setRouteAirportHighlights(null);
     primaryDetailHex = null;
-    if (detailAbortController) {
-        detailAbortController.abort();
-        detailAbortController = null;
-    }
-    window.clearTimeout(detailRefreshTimer);
-    detailRefreshTimer = null;
+    detailScheduler.clear();
 }
 
 function displayAircraftImage(aircraft) {
@@ -1352,7 +1365,12 @@ function updateAircraftMotion(item, marker, latitude, longitude) {
     const reportedTrack = isMissing(item.track)
         ? NaN
         : Number(item.track);
-    const position = { lat: latitude, lon: longitude, receivedAt: now };
+    const observedAt = Number(item.position_observed_at) * 1000;
+    const position = {
+        lat: latitude,
+        lon: longitude,
+        receivedAt: Number.isFinite(observedAt) ? observedAt : now
+    };
     let state = aircraftMotionStates.get(item.hex);
 
     if (!state) {
@@ -1416,7 +1434,7 @@ function animateAircraftMarkers(frameTime) {
         const now = Date.now();
         const projectionLimitMs = Math.min(
             Math.max(expectedAircraftUpdateMs * 2, 15000),
-            30000
+            positionFreshMs
         );
         const correctionDurationMs = Math.min(
             expectedAircraftUpdateMs * 0.2,
@@ -1641,6 +1659,7 @@ function returnToNearestAfterMissing(missingHex) {
         (item) => item.hex !== missingHex
     );
     primarySelectionIsManual = false;
+    clearPrimaryAircraftPath();
     document.getElementById("primary-heading").textContent =
         "Nearest contact";
 
@@ -1656,40 +1675,39 @@ function returnToNearestAfterMissing(missingHex) {
     loadPrimaryAircraft(primaryAircraftHex);
 }
 
-async function loadPrimaryAircraft(aircraftHex) {
-    const requestNumber = ++primaryRequestNumber;
+function loadPrimaryAircraft(aircraftHex) {
     const basicAircraft = visibleAircraft.find(
         (item) => item.hex === aircraftHex
     );
     const selectionChanged = primaryDetailHex !== aircraftHex;
-
-    if (selectionChanged && detailAbortController) {
-        detailAbortController.abort();
-    }
-    window.clearTimeout(detailRefreshTimer);
-    detailRefreshTimer = null;
     primaryDetailHex = aircraftHex;
 
     if (selectionChanged) {
         clearPrimaryAircraftPath();
         setRouteAirportHighlights(null);
+        displayPrimaryAircraft(basicAircraft, true, true);
     }
 
-    // Preserve known airport/route details during the routine one-second
-    // position refresh. Show the loading state only for a new aircraft.
-    displayPrimaryAircraft(
-        basicAircraft,
-        selectionChanged,
-        selectionChanged
+    detailScheduler.select(
+        aircraftHex,
+        basicAircraft ? basicAircraft.callsign : ""
     );
+}
 
-    const controller = new AbortController();
-    detailAbortController = controller;
-    const timeout = window.setTimeout(() => controller.abort(), 8000);
+async function fetchPrimaryAircraftDetail(
+    aircraftHex,
+    scheduledCallsign,
+    generation,
+    signal
+) {
+    const requestNumber = ++primaryRequestNumber;
+    const basicAircraft = visibleAircraft.find(
+        (item) => item.hex === aircraftHex
+    );
 
     try {
         const response = await fetch(aircraftDetailUrl(aircraftHex), {
-            signal: controller.signal
+            signal
         });
 
         if (response.status === 404) {
@@ -1706,53 +1724,46 @@ async function loadPrimaryAircraft(aircraftHex) {
 
         if (
             requestNumber === primaryRequestNumber &&
-            aircraft.hex === primaryAircraftHex
+            aircraft.hex === primaryAircraftHex &&
+            detailScheduler.isCurrent(aircraftHex, generation)
         ) {
             displayPrimaryAircraft(aircraft);
             displayPrimaryAircraftPath(aircraft);
             setRouteAirportHighlights(aircraft);
-
-            if (["loading", "busy", "retrying"].includes(
-                aircraft.route_status
-            )) {
-                const retryDelay = aircraft.route_status === "retrying"
-                    ? Math.max(
-                        5000,
-                        Math.min(
-                            60000,
-                            Number(aircraft.route_retry_after) * 1000 - Date.now()
-                        )
-                    )
-                    : 5000;
-                detailRefreshTimer = window.setTimeout(() => {
-                    if (
-                        aircraftHex === primaryAircraftHex &&
-                        !document.hidden
-                    ) {
-                        loadPrimaryAircraft(aircraftHex);
-                    }
-                }, retryDelay);
-            }
         }
     } catch (error) {
+        if (
+            error.name === "AbortError" &&
+            signal.detailTimeout &&
+            detailScheduler.isCurrent(aircraftHex, generation)
+        ) {
+            selectedDetailFailures += 1;
+        }
         if (error.name !== "AbortError") {
             console.error("Could not retrieve selected aircraft:", error);
         }
 
-        if (error.name !== "AbortError" && requestNumber === primaryRequestNumber) {
+        if (
+            error.name !== "AbortError" &&
+            requestNumber === primaryRequestNumber &&
+            detailScheduler.isCurrent(aircraftHex, generation)
+        ) {
+            selectedDetailFailures += 1;
             if (error.aircraftMissing) {
                 returnToNearestAfterMissing(aircraftHex);
             } else {
                 displayPrimaryAircraft(basicAircraft);
             }
         }
-    } finally {
-        window.clearTimeout(timeout);
-        if (detailAbortController === controller) {
-            detailAbortController = null;
-        }
     }
 }
+
+const detailScheduler = new AircraftDetailScheduler({
+    intervalMs: Number(config.aircraftDetailRefreshMs) || 7000,
+    requestTimeoutMs: 8000,
+    hidden: document.hidden,
+    poll: fetchPrimaryAircraftDetail
+});
 
 function selectAircraft(aircraftHex, manual = true) {
     const aircraftExists = visibleAircraft.some(
@@ -1802,7 +1813,11 @@ async function updateAircraftDisplay() {
             throw new Error(`HTTP ${response.status}`);
         }
 
-        visibleAircraft = await response.json();
+        const payload = await response.json();
+        visibleAircraft = snapshotGuard.accept(
+            payload,
+            response.headers.get("X-Collector-Fresh") === "1"
+        );
         updateAircraftMarkers(visibleAircraft);
 
         if (visibleAircraft.length === 0) {
@@ -1819,6 +1834,13 @@ async function updateAircraftDisplay() {
             (item) => item.hex === primaryAircraftHex
         );
 
+        if (primaryAircraftHex && !selectedAircraftStillExists) {
+            clearPrimaryAircraftPath();
+            setRouteAirportHighlights(null);
+            detailScheduler.clear();
+            primaryDetailHex = null;
+        }
+
         if (!primarySelectionIsManual || !selectedAircraftStillExists) {
             primaryAircraftHex = visibleAircraft[0].hex;
             primarySelectionIsManual = false;
@@ -1833,12 +1855,20 @@ async function updateAircraftDisplay() {
             (item) => item.hex === primaryAircraftHex
         );
         displayPrimaryAircraft(basicAircraft, false, false);
-        if (primaryDetailHex !== primaryAircraftHex) {
-            loadPrimaryAircraft(primaryAircraftHex);
-        }
+        // This is cheap when the selection/callsign is unchanged. The detail
+        // scheduler owns the bounded trail cadence and prevents overlap.
+        loadPrimaryAircraft(primaryAircraftHex);
     } catch (error) {
         if (error.name !== "AbortError") {
             console.error("Could not retrieve aircraft list:", error);
+        }
+        if (snapshotGuard.failed()) {
+            visibleAircraft = [];
+            updateAircraftMarkers([]);
+            primaryAircraftHex = null;
+            primarySelectionIsManual = false;
+            clearPrimaryAircraft();
+            renderAircraftList([], null);
         }
     } finally {
         window.clearTimeout(timeout);
@@ -1865,7 +1895,22 @@ function recordFrontendUpdate(durationMs) {
         aircraftMarkers: aircraftMarkers.size,
         aircraftRows: aircraftRows.size,
         trailPoints: primaryPathLine.getLatLngs().length,
-        constrainedProfile
+        constrainedProfile,
+        snapshotNetworkConnected: snapshotGuard.networkConnected,
+        snapshotDataFresh: snapshotGuard.dataFresh,
+        selectedDetailFailures
+    });
+    fetch(frontendDiagnosticsUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            selected_detail_failures: selectedDetailFailures,
+            trail_revision: primaryTrailRevision,
+            trail_segment_count: primaryTrailSegmentId === null ? 0 : 1,
+            trail_point_count: primaryPathLine.getLatLngs().length
+        })
+    }).catch((error) => {
+        console.error("Could not report frontend diagnostics:", error);
     });
     frontendUpdateCount = 0;
     frontendUpdateTotalMs = 0;
@@ -1873,11 +1918,9 @@ function recordFrontendUpdate(durationMs) {
 }
 
 document.addEventListener("visibilitychange", () => {
+    detailScheduler.setVisible(!document.hidden);
     if (!document.hidden) {
         updateAircraftDisplay();
-        if (primaryAircraftHex) {
-            loadPrimaryAircraft(primaryAircraftHex);
-        }
         ensureAnimationLoop();
     }
 });
