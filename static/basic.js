@@ -1,4 +1,4 @@
-/* One text-only request at a time; no map, details, pictures or animation loop. */
+/* One lightweight request at a time; no map, trails or animation loop. */
 (() => {
     "use strict";
     const config = window.basicConfig;
@@ -17,6 +17,58 @@
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed.toFixed(decimals) : null;
     };
+    const missing = (value) => value === null || value === undefined ||
+        value === "" || value === "NA" || value === "N/A";
+    function clearImage() {
+        const image = document.getElementById("aircraft-image");
+        image.hidden = true;
+        image.removeAttribute("src");
+        image.alt = "";
+        document.body.dataset.image = "false";
+    }
+    function renderImage(aircraft) {
+        const image = document.getElementById("aircraft-image");
+        if (!aircraft.aircraft_image) {
+            clearImage();
+            return;
+        }
+        if (image.getAttribute("src") !== aircraft.aircraft_image) {
+            image.src = aircraft.aircraft_image;
+        }
+        image.alt = missing(aircraft.t)
+            ? "Aircraft reference photograph"
+            : `${aircraft.t} aircraft reference photograph`;
+        image.hidden = false;
+        document.body.dataset.image = "true";
+    }
+    function renderRoute(aircraft) {
+        const status = aircraft.route_status;
+        let departure = aircraft.departure;
+        let departureName = aircraft.departure_name;
+        let destination = aircraft.destination;
+        let destinationName = aircraft.destination_name;
+        if (["loading", "busy"].includes(status)) {
+            departure = destination = "…";
+            departureName = "Looking up airport route";
+            destinationName = null;
+        } else if (status === "retrying") {
+            departure = destination = null;
+            departureName = "Route lookup delayed";
+            destinationName = null;
+        } else if (status === "disabled") {
+            departure = destination = null;
+            departureName = "Airport lookup is off";
+            destinationName = null;
+        } else if (status === "unavailable") {
+            departure = destination = null;
+            departureName = "No public airport route found";
+            destinationName = null;
+        }
+        set("departure", missing(departure) ? null : departure);
+        set("departure-name", missing(departureName) ? null : departureName);
+        set("destination", missing(destination) ? null : destination);
+        set("destination-name", missing(destinationName) ? null : destinationName);
+    }
     function clear(status) {
         window.clearTimeout(expiryTimer);
         expiryTimer = null;
@@ -24,6 +76,8 @@
         set("callsign", "No aircraft");
         set("status", status);
         set("source", "Waiting for fresh positions");
+        for (const id of ["departure", "departure-name", "destination", "destination-name"]) set(id, null);
+        clearImage();
         document.body.dataset.live = "false";
     }
     function render(payload) {
@@ -50,6 +104,8 @@
         set("speed", number(aircraft.gs));
         set("track", number(aircraft.track));
         set("hex", aircraft.hex.toUpperCase());
+        renderImage(aircraft);
+        renderRoute(aircraft);
         set("source", aircraft.source === "local" ? "Local receiver" : "Remote source");
         set("status", "Live");
         document.body.dataset.live = "true";

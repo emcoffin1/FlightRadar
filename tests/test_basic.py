@@ -44,14 +44,38 @@ class BasicDisplayTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.client = web_app.app.test_client()
 
-    def test_nearest_snapshot_does_not_enrich_or_serialize_assets(self):
-        with patch.object(web_app, "resolve_aircraft_route", side_effect=AssertionError("route lookup")), patch.object(web_app, "serialize_aircraft", side_effect=AssertionError("asset lookup")):
+    def test_nearest_snapshot_includes_image_and_airport_route(self):
+        route = {
+            "route_status": "ready",
+            "departure": "LAX",
+            "departure_name": "Los Angeles International Airport",
+            "destination": "SFO",
+            "destination_name": "San Francisco International Airport",
+        }
+
+        def resolve(aircraft):
+            return {**aircraft, **route}
+
+        with (
+            patch.object(web_app, "resolve_aircraft_route", side_effect=resolve),
+            patch.object(
+                web_app,
+                "aircraft_image_url",
+                return_value="/static/aircraft_photos/c172.webp",
+            ),
+        ):
             response = self.client.get("/api/aircraft/nearest")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         aircraft = response.get_json()["aircraft"]
         self.assertEqual(aircraft["hex"], "near01")
         self.assertEqual(aircraft["r"], "N123AB")
+        self.assertEqual(aircraft["departure"], "LAX")
+        self.assertEqual(aircraft["destination_name"], route["destination_name"])
+        self.assertEqual(
+            aircraft["aircraft_image"],
+            "/static/aircraft_photos/c172.webp",
+        )
         self.assertNotIn("path", aircraft)
 
     def test_departed_aircraft_switches_to_next_fresh_contact(self):
@@ -75,6 +99,8 @@ class BasicDisplayTests(unittest.TestCase):
     def test_basic_document_loads_only_lightweight_scripts(self):
         page = self.client.get("/basic").get_data(as_text=True)
         self.assertIn("basic.js", page)
+        self.assertIn('id="aircraft-image"', page)
+        self.assertIn('aria-label="Airport locations"', page)
         for heavy_resource in ["leaflet.js", "dashboard.js", "detail_scheduler.js", "aircraft_photos", "fonts/"]:
             self.assertNotIn(heavy_resource, page)
         self.assertIn('href="/"', page)

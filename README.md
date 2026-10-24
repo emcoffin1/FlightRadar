@@ -329,14 +329,17 @@ tap replaces the current page rather than adding map pages to browser back
 history. The display reserves room for the tab so it cannot cover controls.
 
 Basic fills the screen with the nearest fresh aircraft's callsign, type,
-registration, distance, altitude, ground speed and track. It automatically
-changes contact as aircraft move, expire or leave the configured range.
+registration, reference image, departure/destination airport information,
+distance, altitude, ground speed and track. It automatically changes contact
+as aircraft move, expire or leave the configured range.
 Missing values are shown as dashes; stale or disconnected data clears the
 contact. Existing range and feed filters still apply. Basic has no settings
 dialog; return to Extra to change them.
 
-Basic loads system fonts and text only: no Leaflet, tiles, photos, aircraft
-icons, trails or selected-aircraft enrichment. It requests one small
+Basic loads system fonts and at most one local aircraft reference image: no
+Leaflet, tiles, aircraft icons, trails or animation loop. It uses the existing
+route-enrichment permission and bounded cache for airport information; when
+that permission is off it clearly says so and makes no route request. It requests one small
 `/api/aircraft/nearest` response at a time, waits two seconds after completion,
 and aborts requests after four seconds. Polling stops while hidden or leaving
 the page. An independent expiry timer clears a contact when its position or
