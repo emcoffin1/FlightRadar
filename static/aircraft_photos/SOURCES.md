@@ -1,7 +1,7 @@
 # Aircraft photograph sources
 
 These locally stored thumbnails were downloaded from Wikimedia Commons
-on 2026-10-11. Each image remains subject to the license shown on its
+on 2026-10-11, with additional family coverage added on 2026-10-24. Each image remains subject to the license shown on its
 linked source-file page. They are generic type/family photographs and are
 not photographs of the particular live aircraft being tracked.
 
@@ -91,3 +91,10 @@ not photographs of the particular live aircraft being tracked.
 | `citation_x.webp` | Cessna Citation X | Cory W. Watts from Madison, Wisconsin, United States of America | CC BY-SA 2.0 | [Commons file](https://commons.wikimedia.org/wiki/File:Cessna_Citation_X_N484T_@MSP,_June_2007.jpg) |
 | `challenger600.webp` | Bombardier Challenger 600 series | Md Shaifuzzaman Ayon | CC BY-SA 4.0 | [Commons file](https://commons.wikimedia.org/wiki/File:TC-RSA_-_Bombardier_CL-600-2B16_Challenger_605_-_5857_-_Redstar_Aviation_-_VGHS.jpg) |
 | `bonanza.webp` | Beechcraft Bonanza 36 | Renato Spilimbergo Carvalho | GFDL 1.2 | [Commons file](https://commons.wikimedia.org/wiki/File:Beech_A36_Bonanza_36_AN2250386.jpg) |
+| `baron.jpg` | Beechcraft Baron B55 / BE95 family | Secretaria de Marina Armada de Mexico | Public domain / CC0 | [Commons file](https://commons.wikimedia.org/wiki/File:Beechcraft_Baron_B-55.jpg) |
+| `mooney.jpg` | Mooney M20 family | Raptor05121 | CC BY-SA 4.0 | [Commons file](https://commons.wikimedia.org/wiki/File:1963_Mooney_M20D_Master.jpg) |
+| `da40.jpg` | Diamond DA40 | worktom | CC BY-SA 3.0 | [Commons file](https://commons.wikimedia.org/wiki/File:DA40_180_full.jpg) |
+| `cessna_twin.jpg` | Cessna 310 / twin-engine family | Robert Frola | GFDL 1.2 | [Commons file](https://commons.wikimedia.org/wiki/File:Cessna_310_(5787155163).jpg) |
+| `glider.jpg` | Generic glider | Mike Peel (www.mikepeel.net) | CC BY-SA 4.0 | [Commons file](https://commons.wikimedia.org/wiki/File:Glider,_London.jpg) |
+| `balloon.jpg` | Hot-air balloon | Neuroxic | CC BY 4.0 | [Commons file](https://commons.wikimedia.org/wiki/File:Hot_air_balloon_close-up_1.JPG) |
+| `ultralight.jpg` | Light-sport / ultralight aircraft | Cavebear42 | CC BY-SA 3.0 | [Commons file](https://commons.wikimedia.org/wiki/File:Light_Sport_Aircraft.jpg) |
