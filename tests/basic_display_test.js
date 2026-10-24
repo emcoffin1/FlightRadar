@@ -30,7 +30,7 @@ function harness() {
         addEventListener(name, fn) { events[name] = fn; }
     };
     vm.runInNewContext(source, {
-        window, document, AbortController, performance: {now: () => now},
+        window, document, navigator: {onLine: true}, AbortController, performance: {now: () => now},
         fetch(url, options) {
             return new Promise((resolve, reject) => {
                 const call = {url, signal: options.signal,
@@ -76,6 +76,8 @@ function payload(hex = "abc123", updates = {}) {
     assert.equal(view.nodes.departure.textContent, "LAX");
     assert.equal(view.nodes["departure-name"].textContent, "Los Angeles International Airport");
     assert.equal(view.nodes.destination.textContent, "SFO");
+    assert.equal(view.document.body.dataset.liveSource, "local");
+    assert.equal(view.requests[0].url, "/api/aircraft/nearest?online=1");
     const writes = view.writes;
     await view.tick(2000); view.requests[1].reply(payload()); await flush();
     assert.equal(view.writes, writes, "unchanged snapshots must not rewrite text");
@@ -109,5 +111,14 @@ function payload(hex = "abc123", updates = {}) {
     await expiry.tick(501);
     assert.equal(expiry.nodes.status.textContent, "Data stale", "expiry must work independently of poll completion");
     expiry.events.pagehide();
+
+    const remote = harness();
+    remote.requests[0].reply({...payload(), collector_fresh: false,
+        heartbeat_at: null, live_source: "adsblol_closest",
+        aircraft: {...payload().aircraft, source: "remote_closest"}}); await flush();
+    assert.equal(remote.nodes.status.textContent, "Live");
+    assert.equal(remote.nodes.source.textContent, "Remote source");
+    assert.equal(remote.document.body.dataset.liveSource, "remote");
+    remote.events.pagehide();
     console.log("Basic display: rendering, freshness, timeout, single-flight and lifecycle checks passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

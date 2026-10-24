@@ -183,6 +183,26 @@ class RemoteProviderTests(unittest.TestCase):
         self.assertIn("/v2/point/", client._external_get.call_args_list[0].args[1])
         self.assertIn("?circle=33.5,-117.1,50", client._external_get.call_args_list[1].args[1])
 
+    def test_closest_uses_explicit_location_and_marks_source(self):
+        now = 1_800_000_000
+        client = ADSB_LOL()
+        client._external_get = Mock(return_value=self.response({
+            "now": now,
+            "ac": [{
+                "hex": "abc123", "flight": "CLOSE1", "lat": 34.01,
+                "lon": -118.01, "seen": 0, "seen_pos": 0,
+            }],
+        }))
+        with patch("adsblol.time.time", return_value=now):
+            aircraft = client.GET_closest(50, lat=34.0, lon=-118.0)
+        self.assertEqual(len(aircraft), 1)
+        self.assertEqual(aircraft[0]["source"], "remote_closest")
+        self.assertLess(aircraft[0]["range"], 1)
+        self.assertIn(
+            "/v2/closest/34.0/-118.0/50",
+            client._external_get.call_args.args[1],
+        )
+
     def test_remote_message_age_is_enforced_independently(self):
         now = 1_800_000_000
         client = ADSB_LOL(lat=33.5, lon=-117.1)

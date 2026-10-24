@@ -19,6 +19,9 @@ RUNTIME_DIR = APP_DIR / ".runtime"
 AIRCRAFT_REFRESH_SECONDS = 1
 LOCAL_RECEIVER_POLL_SECONDS = 1
 ADSB_LOL_POLL_SECONDS = 10
+# The reversionary display only uses this lookup when its normal aircraft
+# snapshot is empty. Keep it independent from the full remote-area poller.
+ADSB_LOL_CLOSEST_POLL_SECONDS = 15
 # Invalid or expired Retry-After guidance must never create a tight loop.
 REMOTE_RETRY_MIN_SECONDS = 60
 # Selected-aircraft trails/details are intentionally slower than snapshots.
