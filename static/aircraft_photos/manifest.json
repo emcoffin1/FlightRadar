@@ -923,6 +923,83 @@
       "license": "GFDL 1.2",
       "license_url": "http://www.gnu.org/licenses/old-licenses/fdl-1.2.html",
       "local_file": "bonanza.webp"
+    },
+    {
+      "key": "baron",
+      "aircraft": "Beechcraft Baron B55 / BE95 family",
+      "wikipedia_page": "https://en.wikipedia.org/wiki/Beechcraft_Baron",
+      "source_file": "https://commons.wikimedia.org/wiki/File:Beechcraft_Baron_B-55.jpg",
+      "source_filename": "Beechcraft Baron B-55.jpg",
+      "author": "Secretaria de Marina Armada de Mexico",
+      "license": "Public domain / CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "local_file": "baron.jpg"
+    },
+    {
+      "key": "mooney",
+      "aircraft": "Mooney M20 family",
+      "wikipedia_page": "https://en.wikipedia.org/wiki/Mooney_M20",
+      "source_file": "https://commons.wikimedia.org/wiki/File:1963_Mooney_M20D_Master.jpg",
+      "source_filename": "1963 Mooney M20D Master.jpg",
+      "author": "Raptor05121",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "local_file": "mooney.jpg"
+    },
+    {
+      "key": "da40",
+      "aircraft": "Diamond DA40",
+      "wikipedia_page": "https://en.wikipedia.org/wiki/Diamond_DA40",
+      "source_file": "https://commons.wikimedia.org/wiki/File:DA40_180_full.jpg",
+      "source_filename": "DA40 180 full.jpg",
+      "author": "worktom",
+      "license": "CC BY-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0",
+      "local_file": "da40.jpg"
+    },
+    {
+      "key": "cessna_twin",
+      "aircraft": "Cessna 310 / twin-engine family",
+      "wikipedia_page": "https://en.wikipedia.org/wiki/Cessna_310",
+      "source_file": "https://commons.wikimedia.org/wiki/File:Cessna_310_(5787155163).jpg",
+      "source_filename": "Cessna 310 (5787155163).jpg",
+      "author": "Robert Frola",
+      "license": "GFDL 1.2",
+      "license_url": "http://www.gnu.org/licenses/old-licenses/fdl-1.2.html",
+      "local_file": "cessna_twin.jpg"
+    },
+    {
+      "key": "glider",
+      "aircraft": "Generic glider",
+      "wikipedia_page": "https://en.wikipedia.org/wiki/Glider_(sailplane)",
+      "source_file": "https://commons.wikimedia.org/wiki/File:Glider,_London.jpg",
+      "source_filename": "Glider, London.jpg",
+      "author": "Mike Peel (www.mikepeel.net)",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+      "local_file": "glider.jpg"
+    },
+    {
+      "key": "balloon",
+      "aircraft": "Hot-air balloon",
+      "wikipedia_page": "https://en.wikipedia.org/wiki/Hot_air_balloon",
+      "source_file": "https://commons.wikimedia.org/wiki/File:Hot_air_balloon_close-up_1.JPG",
+      "source_filename": "Hot air balloon close-up 1.JPG",
+      "author": "Neuroxic",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0",
+      "local_file": "balloon.jpg"
+    },
+    {
+      "key": "ultralight",
+      "aircraft": "Light-sport / ultralight aircraft",
+      "wikipedia_page": "https://en.wikipedia.org/wiki/Light-sport_aircraft",
+      "source_file": "https://commons.wikimedia.org/wiki/File:Light_Sport_Aircraft.jpg",
+      "source_filename": "Light Sport Aircraft.jpg",
+      "author": "Cavebear42",
+      "license": "CC BY-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0",
+      "local_file": "ultralight.jpg"
     }
   ],
   "failures": []

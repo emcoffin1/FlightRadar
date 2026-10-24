@@ -136,6 +136,12 @@ curl -fL \
 
 FlightRadar imports this file into its local SQLite database and enriches
 receiver contacts by ICAO hex. No external request is made during lookup.
+Aircraft reference photographs are also resolved locally by ICAO type code;
+the browser never calls an aircraft-photo API. The bundled family mappings
+currently cover about 71% of typed records in the bundled metadata snapshot,
+including common Beechcraft Baron/BE95, Mooney, Diamond, Cessna twin, glider,
+balloon, ultralight, Van's RV, Piper, Bell and King Air codes. Photographs are
+representative family images, not pictures of the particular live airframe.
 
 You can also configure `readsb` itself to add the `t`, `r`, and `dbFlags`
 fields to `aircraft.json`. Install the same database in its standard location:

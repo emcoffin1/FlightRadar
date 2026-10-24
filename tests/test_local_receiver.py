@@ -317,6 +317,26 @@ class AircraftMetadataTests(unittest.TestCase):
 
 
 class AircraftAssetTests(unittest.TestCase):
+    def test_common_unmapped_families_now_have_local_photos(self):
+        expected = {
+            "BE95": "baron.jpg",
+            "M20P": "mooney.jpg",
+            "DA40": "da40.jpg",
+            "C310": "cessna_twin.jpg",
+            "GLID": "glider.jpg",
+            "BALL": "balloon.jpg",
+            "ULAC": "ultralight.jpg",
+            "B06": "bell407.webp",
+            "BE20": "kingair.webp",
+            "RV6": "rv7.webp",
+        }
+        with web_app.app.test_request_context():
+            for type_code, filename in expected.items():
+                with self.subTest(type_code=type_code):
+                    self.assertTrue(
+                        web_app.aircraft_image_url(type_code).endswith(filename)
+                    )
+
     def test_common_helicopter_types_use_rotorcraft_assets(self):
         with web_app.app.test_request_context():
             self.assertTrue(web_app.aircraft_icon_url("B407").endswith("R44.svg"))
