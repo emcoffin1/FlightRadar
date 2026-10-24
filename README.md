@@ -321,3 +321,80 @@ military identification depends on `dbFlags` being present in `readsb` output;
 aircraft without the Military flag are treated as normal. Select the 50 NM
 range for the intended nearby military-aircraft view.
 
+## Basic display
+
+Use the curved **Basic** tab on the right of Extra (the normal radar page) to
+open `/basic`. The **Extra** tab on its left returns to the radar. A normal
+tap replaces the current page rather than adding map pages to browser back
+history. The display reserves room for the tab so it cannot cover controls.
+
+Basic fills the screen with the nearest fresh aircraft's callsign, type,
+registration, distance, altitude, ground speed and track. It automatically
+changes contact as aircraft move, expire or leave the configured range.
+Missing values are shown as dashes; stale or disconnected data clears the
+contact. Existing range and feed filters still apply. Basic has no settings
+dialog; return to Extra to change them.
+
+Basic loads system fonts and text only: no Leaflet, tiles, photos, aircraft
+icons, trails or selected-aircraft enrichment. It requests one small
+`/api/aircraft/nearest` response at a time, waits two seconds after completion,
+and aborts requests after four seconds. Polling stops while hidden or leaving
+the page. An independent expiry timer clears a contact when its position or
+collector heartbeat becomes stale, even if the next request hangs.
+
+This switches the browser view only. Collection, optional feeding, configured
+remote polling, and history recording continue in the backend. It does not
+silently change network permissions. To launch the kiosk directly in Basic,
+use `http://127.0.0.1:5000/basic` as Cog's URL; no receiver changes are needed.
+
+## Display performance review (October 2026)
+
+Changes in this revision:
+
+- Extra cancels its animation frame loop while hidden, empty, or in constrained
+  mode. Previously an unconstrained hidden/empty map still scheduled frames.
+- Constrained mode skips motion-state calculations and clears retained motion
+  states when enabled. Static marker positions still update at receiver cadence.
+- Repeated primary text values no longer rewrite identical DOM text nodes.
+- Frontend diagnostics has a five-second timeout and a single-flight guard,
+  preventing hung minute-by-minute reports from accumulating requests.
+- Basic replaces the heavyweight document instead of hiding a running map.
+
+Existing protections verified in the code: departed marker/motion/list entries
+are removed, list rows and marker elements are reused, details have timeout and
+generation guards, trail responses are capped at 360 points, route workers have
+a bounded queue, remote collection permits one outstanding request, and SQLite
+connections close through a context manager. These are not evidence of an
+unbounded collection leak. WPE/Cog process memory, decoded images, map tiles,
+graphics buffers and zram can still consume much of a Zero 2 W's memory.
+
+Remaining findings:
+
+- `route_cache` has no retention/expiry policy. It can accumulate rows on disk
+  and preserve outdated routes for recurring callsigns. A separate change should
+  define success/negative-cache TTLs and batched pruning while preserving offline
+  cached results. Basic never reads or populates that cache.
+- Downloaded map tiles have no global disk budget; changing receiver locations
+  can leave older tile files behind. This is disk growth, not a demonstrated RAM
+  leak. Basic does not request tiles.
+- Extra still polls snapshots every second and renders a map and selected detail
+  every seven seconds. Its normal browser/graphics footprint remains significant
+  on 512 MB hardware; constrained mode should stay enabled on the Zero 2 W.
+- The available logs identify memory pressure and kiosk-specific lag, but do not
+  establish that the physical screen is responsible. No JavaScript heap profile
+  or WPE/Cog multi-hour memory trace was available for this review.
+
+Validation: `python3 -m unittest discover -s tests -v` includes endpoint tests
+and, when Node.js is installed, deterministic Basic-client and animation-loop
+tests. They cover stale/empty contacts, nearest switching, no route/asset work,
+request timeouts, non-overlap, unchanged text, and hidden/page-exit cleanup.
+Existing scheduler tests can also run with `gjs -m tests/detail_scheduler_test.js`.
+
+Before relying on this release on the Pi, compare Extra and Basic at the actual
+display resolution, tap both tabs repeatedly, verify empty/stale reception, and
+run each mode for at least an hour with similar traffic. Record process RSS,
+`free -h`, `zramctl`, and the interval rows of `vmstat 2` (the first row is a
+since-boot average). Compare available RAM and swap-in/out activity, rather than
+only swap occupancy; inactive swapped pages may remain after pressure subsides.
+Browser binaries were unavailable in the review environment, so Safari/DRM visual
+layout and actual WPE memory savings still require this hardware check.

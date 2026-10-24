@@ -1,0 +1,32 @@
+/* Reserve space so the tab never covers controls, including on small screens. */
+body > .extra-display { width: min(1120px, calc(100% - 38px)); margin-right: 38px; }
+.view-tab {
+    position: fixed;
+    top: max(12px, env(safe-area-inset-top));
+    bottom: max(12px, env(safe-area-inset-bottom));
+    z-index: 1200;
+    width: 38px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #edc37b;
+    background: #292117;
+    border: 1px solid #755c35;
+    text-decoration: none;
+    font: 600 14px system-ui, sans-serif;
+    letter-spacing: .12em;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+.view-tab span { writing-mode: vertical-rl; }
+.view-tab--right { right: 0; border-right: 0; border-radius: 28px 0 0 28px; }
+.view-tab--left { left: 0; border-left: 0; border-radius: 0 28px 28px 0; }
+.view-tab--left span { transform: rotate(180deg); }
+.view-tab:active { background: #594329; }
+.view-tab:focus-visible { outline: 3px solid #f4cd87; outline-offset: -4px; }
+@media (pointer: coarse) {
+    .view-tab { width: 44px; }
+    body > .extra-display { width: min(1120px, calc(100% - 44px)); margin-right: 44px; }
+    body > .basic-display { margin-left: 44px; }
+}
