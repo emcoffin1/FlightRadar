@@ -79,6 +79,7 @@
         for (const id of ["departure", "departure-name", "destination", "destination-name"]) set(id, null);
         clearImage();
         document.body.dataset.live = "false";
+        document.body.dataset.liveSource = "none";
     }
     function render(payload) {
         window.clearTimeout(expiryTimer);
@@ -87,8 +88,11 @@
         const generated = Number(payload.generated_at) * 1000;
         const heartbeatAge = generated - Number(payload.heartbeat_at) * 1000;
         const age = aircraft ? generated - Number(aircraft.position_observed_at) * 1000 : NaN;
-        const remaining = Math.min(config.positionFreshMs - age, config.heartbeatFreshMs - heartbeatAge);
-        if (!payload.collector_fresh || !Number.isFinite(heartbeatAge) || heartbeatAge < -config.clockSkewMs) {
+        const fallback = payload.live_source === "adsblol_closest";
+        const remaining = fallback
+            ? config.positionFreshMs - age
+            : Math.min(config.positionFreshMs - age, config.heartbeatFreshMs - heartbeatAge);
+        if (!fallback && (!payload.collector_fresh || !Number.isFinite(heartbeatAge) || heartbeatAge < -config.clockSkewMs)) {
             clear("Receiver stale");
             return;
         }
@@ -109,6 +113,7 @@
         set("source", aircraft.source === "local" ? "Local receiver" : "Remote source");
         set("status", "Live");
         document.body.dataset.live = "true";
+        document.body.dataset.liveSource = fallback ? "remote" : "local";
         expiryTimer = window.setTimeout(() => clear("Data stale"), remaining);
     }
     async function poll() {
@@ -119,7 +124,12 @@
         const timeout = window.setTimeout(() => requestController.abort(), 4000);
         const started = performance.now();
         try {
-            const response = await fetch(config.url, { signal: requestController.signal, cache: "no-store" });
+            const separator = config.url.includes("?") ? "&" : "?";
+            const online = navigator.onLine === false ? "0" : "1";
+            const response = await fetch(`${config.url}${separator}online=${online}`, {
+                signal: requestController.signal,
+                cache: "no-store"
+            });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const payload = await response.json();
             if (active && token === generation && !document.hidden) {
@@ -152,5 +162,6 @@
     document.addEventListener("visibilitychange", () => document.hidden ? stop() : start());
     window.addEventListener("pagehide", stop);
     window.addEventListener("pageshow", start);
+    window.addEventListener("online", () => { if (active && !controller) poll(); });
     start();
 })();

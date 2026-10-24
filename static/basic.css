@@ -13,7 +13,8 @@ body { margin: 0; }
 header, footer { display: flex; justify-content: space-between; gap: 16px; color: #aaa69c; font-size: clamp(12px, 2vw, 18px); }
 header { text-transform: uppercase; letter-spacing: .09em; }
 #status { text-align: right; }
-body[data-live="true"] #status { color: #88b892; }
+body[data-live="true"][data-live-source="local"] #status { color: #88b892; }
+body[data-live="true"][data-live-source="remote"] #status { color: #e89a3c; }
 .contact { align-self: center; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 30vw); align-items: center; gap: clamp(18px, 4vw, 52px); }
 body[data-image="false"] .contact { grid-template-columns: minmax(0, 1fr); }
 .identity { min-width: 0; }

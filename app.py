@@ -32,6 +32,7 @@ from flask import (
 )
 
 from adsblol import ADSB_LOL
+from closest_fallback import ClosestAircraftFallback
 from aircraft_assets import (
     AIRCRAFT_IMAGE_ALIASES,
     AIRCRAFT_IMAGE_FILES,
@@ -72,6 +73,7 @@ LOGGER = logging.getLogger("adsb_display")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 adsb_client = ADSB_LOL()
+closest_aircraft_fallback = ClosestAircraftFallback(adsb_client)
 route_coordinator = None
 
 
@@ -498,7 +500,7 @@ def resolve_aircraft_route(aircraft):
         return aircraft
     aircraft = dict(aircraft)
 
-    if aircraft["route_lookup_complete"] and aircraft["departure"] is not None:
+    if aircraft.get("route_lookup_complete") and aircraft.get("departure") is not None:
         aircraft["route_status"] = (
             "unavailable"
             if aircraft["departure"] in {"NA", "N/A"}
@@ -988,6 +990,12 @@ def get_nearest_aircraft():
             <= COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
         )
         row = None
+        settings = conn.execute("""
+            SELECT center_lat, center_lon, search_range_nm,
+                remote_aircraft_enabled, offline_mode_enabled
+            FROM app_settings
+            WHERE id = 1
+        """).fetchone()
         if fresh:
             row = conn.execute("""
                 SELECT hex, callsign, t, r, alt_baro, range, gs, track,
@@ -1004,8 +1012,30 @@ def get_nearest_aircraft():
             """, (now - POSITION_FRESH_SECONDS,
                   now + CLOCK_SKEW_TOLERANCE_SECONDS)).fetchone()
     aircraft = None
+    live_source = None
     if row is not None:
         aircraft = resolve_aircraft_route(dict(row))
+        live_source = "local" if aircraft.get("source") == "local" else "remote"
+    else:
+        network_allowed = (
+            settings is not None
+            and bool(settings["remote_aircraft_enabled"])
+            and not bool(settings["offline_mode_enabled"])
+        )
+        browser_online = request.args.get("online") == "1"
+        if not network_allowed:
+            closest_aircraft_fallback.disable()
+        elif browser_online:
+            fallback = closest_aircraft_fallback.tick(
+                latitude=settings["center_lat"],
+                longitude=settings["center_lon"],
+                radius=settings["search_range_nm"],
+            )
+            if fallback:
+                aircraft = resolve_aircraft_route(fallback[0])
+                live_source = "adsblol_closest"
+
+    if aircraft is not None:
         aircraft["aircraft_image"] = aircraft_image_url(aircraft.get("t"))
         if (
             aircraft["aircraft_image"] is None
@@ -1018,6 +1048,7 @@ def get_nearest_aircraft():
         "collector_fresh": fresh,
         "heartbeat_at": heartbeat,
         "generated_at": now,
+        "live_source": live_source,
     })
     response.headers["Cache-Control"] = "no-store"
     return response

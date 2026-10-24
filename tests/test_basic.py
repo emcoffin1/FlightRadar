@@ -96,6 +96,52 @@ class BasicDisplayTests(unittest.TestCase):
         self.assertIsNone(payload["aircraft"])
         self.assertTrue(payload["collector_fresh"])
 
+    def test_empty_snapshot_uses_online_closest_fallback_when_allowed(self):
+        with connect_database(self.path) as conn:
+            conn.execute("DELETE FROM adsb_data")
+            conn.execute("""
+                UPDATE app_settings
+                SET remote_aircraft_enabled = 1, offline_mode_enabled = 0
+                WHERE id = 1
+            """)
+        fallback = {
+            "hex": "remote1", "callsign": "REMOTE1", "t": "BE95",
+            "r": "N95", "range": 8.5, "lat": 33.1, "lon": -118.1,
+            "alt_baro": 5000, "gs": 140, "track": 270,
+            "source": "remote_closest", "category": "Small Aircraft",
+            "position_observed_at": self.now,
+        }
+        with (
+            patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[fallback]) as tick,
+            patch.object(web_app, "resolve_aircraft_route", side_effect=lambda aircraft: aircraft),
+        ):
+            payload = self.client.get("/api/aircraft/nearest?online=1").get_json()
+        self.assertEqual(payload["aircraft"]["hex"], "remote1")
+        self.assertEqual(payload["live_source"], "adsblol_closest")
+        tick.assert_called_once()
+
+    def test_closest_fallback_respects_offline_browser_and_settings(self):
+        with connect_database(self.path) as conn:
+            conn.execute("DELETE FROM adsb_data")
+            conn.execute("""
+                UPDATE app_settings
+                SET remote_aircraft_enabled = 1, offline_mode_enabled = 0
+                WHERE id = 1
+            """)
+        with patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[]) as tick:
+            self.client.get("/api/aircraft/nearest?online=0")
+            tick.assert_not_called()
+
+        with connect_database(self.path) as conn:
+            conn.execute("UPDATE app_settings SET offline_mode_enabled = 1 WHERE id = 1")
+        with (
+            patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[]) as tick,
+            patch.object(web_app.closest_aircraft_fallback, "disable") as disable,
+        ):
+            self.client.get("/api/aircraft/nearest?online=1")
+            tick.assert_not_called()
+            disable.assert_called_once()
+
     def test_basic_document_loads_only_lightweight_scripts(self):
         page = self.client.get("/basic").get_data(as_text=True)
         self.assertIn("basic.js", page)

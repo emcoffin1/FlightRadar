@@ -342,6 +342,15 @@ Missing values are shown as dashes; stale or disconnected data clears the
 contact. Existing range and feed filters still apply. Basic has no settings
 dialog; return to Extra to change them.
 
+If that normal aircraft snapshot is empty, the browser reports whether it is
+online and the backend can fall back to adsb.lol's closest-aircraft endpoint.
+The fallback is shared across open displays and runs at most once every 15
+seconds (`ADSB_LOL_CLOSEST_POLL_SECONDS` in `config.py`). It only runs when
+**Remote adsb.lol aircraft** is enabled and **Offline mode** is off; it never
+uploads receiver data. Local aircraft immediately take priority again. The
+Basic **Live** label is green for the normal snapshot and orange while showing
+the closest-aircraft fallback.
+
 Basic loads system fonts and at most one local aircraft reference image: no
 Leaflet, tiles, aircraft icons, trails or animation loop. It uses the existing
 route-enrichment permission and bounded cache for airport information; when

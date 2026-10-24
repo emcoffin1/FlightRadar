@@ -152,6 +152,9 @@ class ADSB_LOL:
         data: dict,
         single_point: bool = False,
         max_range: float | None = None,
+        *,
+        reference_lat=None,
+        reference_lon=None,
     ):
         """
         Calculates the distance of each aircraft from the given point (self.LAT, self.LON) and adds it to the aircraft data.
@@ -162,6 +165,9 @@ class ADSB_LOL:
             items = data['ac']
             
 
+        center_lat = self.LAT if reference_lat is None else float(reference_lat)
+        center_lon = self.LON if reference_lon is None else float(reference_lon)
+
         for ac in items:
             if 'lat' in ac and 'lon' in ac:
                 lat = ac['lat']
@@ -171,10 +177,10 @@ class ADSB_LOL:
 
             if lat != 0 and lon != 0:
                 # Calculation
-                dlat = radians(self.LAT - lat)
-                dlon = radians(self.LON - lon)
+                dlat = radians(center_lat - lat)
+                dlon = radians(center_lon - lon)
 
-                a = sin(dlat / 2)**2 + cos(radians(lat)) * cos(radians(self.LAT)) * sin(dlon / 2)**2
+                a = sin(dlat / 2)**2 + cos(radians(lat)) * cos(radians(center_lat)) * sin(dlon / 2)**2
                 c = 2 * atan2(sqrt(a), sqrt(1 - a))
                 distance = EARTH_RADIUS_NM * c
             else:
@@ -224,6 +230,8 @@ class ADSB_LOL:
         *,
         source=None,
         fetched_at=None,
+        reference_lat=None,
+        reference_lon=None,
     ):
         """
         Filters the data so that all lists contain the same value
@@ -298,6 +306,8 @@ class ADSB_LOL:
             single_point=False,
             data={"ac": normalized_input},
             max_range=max_range,
+            reference_lat=reference_lat,
+            reference_lon=reference_lon,
         )
         acs = data_ranged['ac']
 
@@ -518,24 +528,39 @@ class ADSB_LOL:
             max_range=range,
             source=f"remote_{provider}",
             fetched_at=fetched_at,
+            reference_lat=latitude,
+            reference_lon=longitude,
         )
         
         return data
 
 
-    def GET_closest(self, range):
-        """
-        Returns closest aircraft to given point, set to 50mi range by default, cannot be changed.
-        """
+    def GET_closest(self, range, *, lat=None, lon=None):
+        """Return the closest fresh aircraft within ``range`` nautical miles."""
+        latitude = self.LAT if lat is None else float(lat)
+        longitude = self.LON if lon is None else float(lon)
+        url = f"https://api.adsb.lol/v2/closest/{latitude}/{longitude}/{range}"
 
-        url = f"https://api.adsb.lol/v2/closest/{self.LAT}/{self.LON}/{range}"
-        
-        response = self._external_get("adsblol_closest", url, timeout=15)
+        response = self._external_get(
+            "adsblol_closest",
+            url,
+            timeout=REMOTE_REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
-        response = response.json()
-        data = self._filter_format(data=response)
-        
-        return data
+        fetched_at = time.time()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("adsb.lol response is not a JSON object")
+        if not isinstance(payload.get("ac"), list):
+            raise ValueError("adsb.lol response does not contain an aircraft list")
+        return self._filter_format(
+            data=payload,
+            max_range=range,
+            source="remote_closest",
+            fetched_at=fetched_at,
+            reference_lat=latitude,
+            reference_lon=longitude,
+        )
 
 if __name__ == "__main__":
     adsb_lol = ADSB_LOL()
