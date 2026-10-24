@@ -494,7 +494,13 @@ function displayCoordinates(coordinates) {
             "constrained-device",
             constrainedProfile
         );
-        ensureAnimationLoop();
+        if (constrainedProfile) {
+            stopAnimationLoop();
+            aircraftMotionStates.clear();
+        } else {
+            updateAircraftMarkers(visibleAircraft);
+            ensureAnimationLoop();
+        }
     }
     if (coordinates.remote_endpoint_preference !== undefined) {
         remoteEndpointPreferenceInput.value =
@@ -762,7 +768,8 @@ function escapeHtml(value) {
 
 function displayValue(elementId, value, suffix = "") {
     const element = document.getElementById(elementId);
-    element.textContent = isMissing(value) ? "N/A" : `${value}${suffix}`;
+    const text = isMissing(value) ? "N/A" : `${value}${suffix}`;
+    if (element.textContent !== text) element.textContent = text;
 }
 
 function displayNumber(elementId, value, decimals, suffix) {
@@ -1428,8 +1435,20 @@ function updateAircraftMotion(item, marker, latitude, longitude) {
 
 let lastMotionFrame = 0;
 let animationLoopRunning = false;
+let motionFrameId = null;
+
+function stopAnimationLoop() {
+    if (motionFrameId !== null) window.cancelAnimationFrame(motionFrameId);
+    motionFrameId = null;
+    animationLoopRunning = false;
+}
 
 function animateAircraftMarkers(frameTime) {
+    motionFrameId = null;
+    if (constrainedProfile || document.hidden || aircraftMotionStates.size === 0) {
+        stopAnimationLoop();
+        return;
+    }
     if (!constrainedProfile && !document.hidden && frameTime - lastMotionFrame >= 50) {
         const now = Date.now();
         const projectionLimitMs = Math.min(
@@ -1495,14 +1514,14 @@ function animateAircraftMarkers(frameTime) {
     if (constrainedProfile) {
         animationLoopRunning = false;
     } else {
-        window.requestAnimationFrame(animateAircraftMarkers);
+        motionFrameId = window.requestAnimationFrame(animateAircraftMarkers);
     }
 }
 
 function ensureAnimationLoop() {
-    if (!constrainedProfile && !animationLoopRunning) {
+    if (!constrainedProfile && !document.hidden && aircraftMotionStates.size > 0 && !animationLoopRunning) {
         animationLoopRunning = true;
-        window.requestAnimationFrame(animateAircraftMarkers);
+        motionFrameId = window.requestAnimationFrame(animateAircraftMarkers);
     }
 }
 
@@ -1607,7 +1626,9 @@ function updateAircraftMarkers(aircraft) {
 
         updateAircraftMarkerAppearance(marker, item);
 
-        updateAircraftMotion(item, marker, latitude, longitude);
+        if (!constrainedProfile) {
+            updateAircraftMotion(item, marker, latitude, longitude);
+        }
         if (constrainedProfile) {
             const current = marker.getLatLng();
             if (current.lat !== latitude || current.lng !== longitude) {
@@ -1638,6 +1659,8 @@ function updateAircraftMarkers(aircraft) {
             aircraftMotionStates.delete(hex);
         }
     }
+    if (aircraftMotionStates.size === 0) stopAnimationLoop();
+    else ensureAnimationLoop();
 }
 
 map.on("zoomend", () => {
@@ -1877,6 +1900,7 @@ async function updateAircraftDisplay() {
     }
 }
 
+let diagnosticsInFlight = false;
 let frontendUpdateCount = 0;
 let frontendUpdateTotalMs = 0;
 let frontendLastReport = performance.now();
@@ -1900,18 +1924,27 @@ function recordFrontendUpdate(durationMs) {
         snapshotDataFresh: snapshotGuard.dataFresh,
         selectedDetailFailures
     });
-    fetch(frontendDiagnosticsUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            selected_detail_failures: selectedDetailFailures,
-            trail_revision: primaryTrailRevision,
-            trail_segment_count: primaryTrailSegmentId === null ? 0 : 1,
-            trail_point_count: primaryPathLine.getLatLngs().length
-        })
-    }).catch((error) => {
-        console.error("Could not report frontend diagnostics:", error);
-    });
+    if (!diagnosticsInFlight) {
+        diagnosticsInFlight = true;
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 5000);
+        fetch(frontendDiagnosticsUrl, {
+            signal: controller.signal,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                selected_detail_failures: selectedDetailFailures,
+                trail_revision: primaryTrailRevision,
+                trail_segment_count: primaryTrailSegmentId === null ? 0 : 1,
+                trail_point_count: primaryPathLine.getLatLngs().length
+            })
+        }).catch((error) => {
+            console.error("Could not report frontend diagnostics:", error);
+        }).finally(() => {
+            window.clearTimeout(timeout);
+            diagnosticsInFlight = false;
+        });
+    }
     frontendUpdateCount = 0;
     frontendUpdateTotalMs = 0;
     frontendLastReport = now;
@@ -1919,6 +1952,7 @@ function recordFrontendUpdate(durationMs) {
 
 document.addEventListener("visibilitychange", () => {
     detailScheduler.setVisible(!document.hidden);
+    if (document.hidden) stopAnimationLoop();
     if (!document.hidden) {
         updateAircraftDisplay();
         ensureAnimationLoop();

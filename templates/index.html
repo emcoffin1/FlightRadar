@@ -14,9 +14,12 @@
             rel="stylesheet"
             href="{{ url_for('static', filename='dashboard.css') }}"
         >
+        <link rel="stylesheet" href="{{ url_for('static', filename='view-tabs.css') }}">
     </head>
     <body{% if constrained_profile_enabled %} class="constrained-device"{% endif %}>
-        <div class="container">
+        <a class="view-tab view-tab--right" href="{{ url_for('basic_display') }}" aria-label="Switch to Basic display"><span>Basic</span></a>
+        <script defer src="{{ url_for('static', filename='view-tabs.js') }}"></script>
+        <div class="container extra-display">
             <aside class="left-panel">
                 <nav class="mode-controls" aria-label="Aircraft feed controls">
                     <button

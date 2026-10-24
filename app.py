@@ -47,6 +47,7 @@ from database import (
 from local_receiver import receiver_json_location
 from route_enrichment import RouteLookupCoordinator
 from config import (
+    CLOCK_SKEW_TOLERANCE_SECONDS,
     AIRCRAFT_DETAIL_REFRESH_SECONDS,
     AIRCRAFT_REFRESH_SECONDS,
     COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS,
@@ -960,6 +961,53 @@ def get_all_aircraft():
         str(status["heartbeat_at"]) if status and status["heartbeat_at"] else ""
     )
     response.headers["X-Response-Generated-At"] = str(now)
+    return response
+
+
+@app.route("/basic")
+def basic_display():
+    return render_template(
+        "basic.html",
+        position_fresh_ms=int(POSITION_FRESH_SECONDS * 1000),
+        heartbeat_fresh_ms=int(COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS * 1000),
+        clock_skew_ms=int(CLOCK_SKEW_TOLERANCE_SECONDS * 1000),
+    )
+
+
+@app.route("/api/aircraft/nearest")
+def get_nearest_aircraft():
+    """Text-only snapshot; never schedules routes, photos, trails or API work."""
+    now = time.time()
+    with connect_database(rows=True) as conn:
+        status = conn.execute(
+            "SELECT heartbeat_at FROM collector_status WHERE id = 1"
+        ).fetchone()
+        heartbeat = status["heartbeat_at"] if status else None
+        fresh = heartbeat is not None and (
+            -CLOCK_SKEW_TOLERANCE_SECONDS <= now - float(heartbeat)
+            <= COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
+        )
+        row = None
+        if fresh:
+            row = conn.execute("""
+                SELECT hex, callsign, t, r, alt_baro, range, gs, track,
+                    position_observed_at, source
+                FROM adsb_data
+                WHERE range IS NOT NULL AND range >= 0
+                    AND range <= (SELECT search_range_nm FROM app_settings WHERE id = 1)
+                    AND lat IS NOT NULL AND lon IS NOT NULL
+                    AND position_observed_at BETWEEN ? AND ?
+                ORDER BY range ASC, hex ASC
+                LIMIT 1
+            """, (now - POSITION_FRESH_SECONDS,
+                  now + CLOCK_SKEW_TOLERANCE_SECONDS)).fetchone()
+    response = jsonify({
+        "aircraft": dict(row) if row else None,
+        "collector_fresh": fresh,
+        "heartbeat_at": heartbeat,
+        "generated_at": now,
+    })
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
