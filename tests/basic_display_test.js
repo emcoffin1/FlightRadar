@@ -11,7 +11,15 @@ function harness() {
     const document = {
         hidden: false, body: {dataset: {}},
         getElementById(id) {
-            return nodes[id] ||= {text: "", get textContent() { return this.text; }, set textContent(v) { writes++; this.text = v; }};
+            return nodes[id] ||= {
+                text: "", hidden: false, alt: "", attributes: {},
+                get textContent() { return this.text; },
+                set textContent(v) { writes++; this.text = v; },
+                get src() { return this.attributes.src || ""; },
+                set src(v) { this.attributes.src = v; },
+                getAttribute(name) { return this.attributes[name] || null; },
+                removeAttribute(name) { delete this.attributes[name]; }
+            };
         },
         addEventListener(name, fn) { events[name] = fn; }
     };
@@ -50,7 +58,11 @@ function harness() {
 function payload(hex = "abc123", updates = {}) {
     return {generated_at: 1000, heartbeat_at: 1000, collector_fresh: true,
         aircraft: {hex, callsign: "TEST1", t: "C172", r: "N123AB", range: 2.14,
-            alt_baro: 0, gs: null, track: 0, source: "local", position_observed_at: 1000, ...updates}};
+            alt_baro: 0, gs: null, track: 0, source: "local", position_observed_at: 1000,
+            aircraft_image: "/static/aircraft_photos/c172.webp", route_status: "ready",
+            departure: "LAX", departure_name: "Los Angeles International Airport",
+            destination: "SFO", destination_name: "San Francisco International Airport",
+            ...updates}};
 }
 (async () => {
     const view = harness();
@@ -59,6 +71,11 @@ function payload(hex = "abc123", updates = {}) {
     assert.equal(view.nodes.callsign.textContent, "TEST1");
     assert.equal(view.nodes.altitude.textContent, "0");
     assert.equal(view.nodes.speed.textContent, "—");
+    assert.equal(view.nodes["aircraft-image"].src, "/static/aircraft_photos/c172.webp");
+    assert.equal(view.nodes["aircraft-image"].hidden, false);
+    assert.equal(view.nodes.departure.textContent, "LAX");
+    assert.equal(view.nodes["departure-name"].textContent, "Los Angeles International Airport");
+    assert.equal(view.nodes.destination.textContent, "SFO");
     const writes = view.writes;
     await view.tick(2000); view.requests[1].reply(payload()); await flush();
     assert.equal(view.writes, writes, "unchanged snapshots must not rewrite text");
@@ -66,6 +83,8 @@ function payload(hex = "abc123", updates = {}) {
     assert.equal(view.nodes.callsign.textContent, "NEXT2");
     await view.tick(2000); view.requests[3].reply({...payload(), aircraft: null}); await flush();
     assert.equal(view.nodes.callsign.textContent, "No aircraft");
+    assert.equal(view.nodes["aircraft-image"].hidden, true);
+    assert.equal(view.nodes.departure.textContent, "—");
     await view.tick(2000); view.requests[4].reply(payload("abc123", {position_observed_at: 900})); await flush();
     assert.equal(view.nodes.callsign.textContent, "No aircraft", "stale positions are rejected");
     view.events.pagehide(); assert.equal(view.timers.size, 0);

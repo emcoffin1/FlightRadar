@@ -976,7 +976,7 @@ def basic_display():
 
 @app.route("/api/aircraft/nearest")
 def get_nearest_aircraft():
-    """Text-only snapshot; never schedules routes, photos, trails or API work."""
+    """Lightweight nearest-aircraft snapshot for the reversionary display."""
     now = time.time()
     with connect_database(rows=True) as conn:
         status = conn.execute(
@@ -991,7 +991,9 @@ def get_nearest_aircraft():
         if fresh:
             row = conn.execute("""
                 SELECT hex, callsign, t, r, alt_baro, range, gs, track,
-                    position_observed_at, source
+                    position_observed_at, source, category,
+                    airline, airline_icao, departure, departure_name,
+                    destination, destination_name, route_lookup_complete
                 FROM adsb_data
                 WHERE range IS NOT NULL AND range >= 0
                     AND range <= (SELECT search_range_nm FROM app_settings WHERE id = 1)
@@ -1001,8 +1003,18 @@ def get_nearest_aircraft():
                 LIMIT 1
             """, (now - POSITION_FRESH_SECONDS,
                   now + CLOCK_SKEW_TOLERANCE_SECONDS)).fetchone()
+    aircraft = None
+    if row is not None:
+        aircraft = resolve_aircraft_route(dict(row))
+        aircraft["aircraft_image"] = aircraft_image_url(aircraft.get("t"))
+        if (
+            aircraft["aircraft_image"] is None
+            and aircraft.get("category") == "Rotorcraft/Helicopter"
+        ):
+            aircraft["aircraft_image"] = aircraft_image_url("R44")
+
     response = jsonify({
-        "aircraft": dict(row) if row else None,
+        "aircraft": aircraft,
         "collector_fresh": fresh,
         "heartbeat_at": heartbeat,
         "generated_at": now,

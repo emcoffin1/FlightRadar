@@ -11,9 +11,25 @@
     <a class="view-tab view-tab--left" href="{{ url_for('hello_world') }}" aria-label="Switch to Extra display"><span>Extra</span></a>
     <main class="basic-display">
         <header><span>Nearest aircraft</span><span id="status" role="status">Connecting</span></header>
-        <section class="identity" aria-label="Aircraft identity">
-            <h1 id="callsign">—</h1>
-            <p><span id="type">—</span><span id="registration">—</span></p>
+        <section class="contact" aria-label="Aircraft identity">
+            <div class="identity">
+                <h1 id="callsign">—</h1>
+                <p><span id="type">—</span><span id="registration">—</span></p>
+            </div>
+            <img id="aircraft-image" class="aircraft-image" hidden alt="">
+        </section>
+        <section class="airport-route" aria-label="Airport locations">
+            <div>
+                <span class="route-label">From</span>
+                <strong id="departure">—</strong>
+                <span id="departure-name">—</span>
+            </div>
+            <span class="route-arrow" aria-hidden="true">→</span>
+            <div>
+                <span class="route-label">To</span>
+                <strong id="destination">—</strong>
+                <span id="destination-name">—</span>
+            </div>
         </section>
         <dl class="instruments">
             <div><dt>Distance</dt><dd><span id="distance">—</span> <small>nm</small></dd></div>
