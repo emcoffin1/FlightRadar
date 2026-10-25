@@ -77,7 +77,7 @@ function payload(hex = "abc123", updates = {}) {
     assert.equal(view.nodes["departure-name"].textContent, "Los Angeles International Airport");
     assert.equal(view.nodes.destination.textContent, "SFO");
     assert.equal(view.document.body.dataset.liveSource, "local");
-    assert.equal(view.requests[0].url, "/api/aircraft/nearest?online=1");
+    assert.equal(view.requests[0].url, "/api/aircraft/nearest");
     const writes = view.writes;
     await view.tick(2000); view.requests[1].reply(payload()); await flush();
     assert.equal(view.writes, writes, "unchanged snapshots must not rewrite text");
@@ -113,8 +113,8 @@ function payload(hex = "abc123", updates = {}) {
     expiry.events.pagehide();
 
     const remote = harness();
-    remote.requests[0].reply({...payload(), collector_fresh: false,
-        heartbeat_at: null, live_source: "adsblol_closest",
+    remote.requests[0].reply({...payload(), collector_fresh: true,
+        heartbeat_at: 1000, live_source: "remote",
         aircraft: {...payload().aircraft, source: "remote_closest"}}); await flush();
     assert.equal(remote.nodes.status.textContent, "Live");
     assert.equal(remote.nodes.source.textContent, "Remote source");

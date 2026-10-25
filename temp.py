@@ -8,6 +8,7 @@ from time import monotonic, sleep, time
 import requests
 
 from adsblol import ADSB_LOL
+from closest_fallback import ClosestAircraftFallback
 from database import (
     connect_database,
     ensure_aircraft_metadata,
@@ -31,7 +32,6 @@ from config import (
     REMOTE_RETRY_MIN_SECONDS,
     REMOTE_AUTH_RETRY_SECONDS,
     REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
-    STALE_PASS_LIMIT,
     TRAIL_MAX_PLAUSIBLE_SPEED_KT,
     TRAIL_SEGMENT_GAP_SECONDS,
 )
@@ -308,6 +308,7 @@ class Database:
                 receiver_beast_port,
                 adsblol_upload_enabled,
                 remote_aircraft_enabled,
+                fallback_aircraft_enabled,
                 offline_mode_enabled,
                 remote_endpoint_preference
             FROM app_settings
@@ -326,7 +327,8 @@ class Database:
             bool(settings[8]),
             bool(settings[9]),
             bool(settings[10]),
-            str(settings[11]),
+            bool(settings[11]),
+            str(settings[12]),
         )
 
     def _record_position(self, conn, aircraft_id, aircraft):
@@ -737,8 +739,14 @@ def run_collector(
         monotonic_clock=monotonic_clock,
         wall_clock=wall_clock,
     )
+    fallback_poller = ClosestAircraftFallback(
+        adsb,
+        monotonic_clock=monotonic_clock,
+        wall_clock=wall_clock,
+    )
     atexit.register(feeder.stop)
     atexit.register(remote_poller.shutdown)
+    atexit.register(fallback_poller.shutdown)
     db = Database()
     remote_aircraft = []
     local_aircraft = []
@@ -749,6 +757,12 @@ def run_collector(
         collection_settings = db.get_collection_settings()
         if len(collection_settings) == 11:
             collection_settings = (*collection_settings, "auto")
+        if len(collection_settings) == 12:
+            collection_settings = (
+                *collection_settings[:10],
+                False,
+                *collection_settings[10:],
+            )
         (
             normal_enabled,
             military_enabled,
@@ -760,6 +774,7 @@ def run_collector(
             receiver_beast_port,
             adsblol_upload_enabled,
             remote_aircraft_enabled,
+            fallback_aircraft_enabled,
             offline_mode_enabled,
             remote_endpoint_preference,
         ) = collection_settings
@@ -791,8 +806,6 @@ def run_collector(
                 local_snapshot_succeeded = True
             except (OSError, ValueError, requests.exceptions.RequestException) as error:
                 local_failures += 1
-                if local_failures >= STALE_PASS_LIMIT:
-                    local_aircraft = []
                 if local_failures == 1 or local_failures % 30 == 0:
                     LOGGER.warning(
                         "Local readsb poll failed (%s consecutive): %s",
@@ -811,14 +824,61 @@ def run_collector(
             local_enabled,
             adsblol_upload_enabled,
         )
+        continuous_remote = remote_aircraft_enabled and not offline_mode_enabled
+        fallback_enabled = (
+            fallback_aircraft_enabled
+            and not remote_aircraft_enabled
+            and not offline_mode_enabled
+        )
+        acquisition_policy = (
+            "continuous_remote" if remote_aircraft_enabled
+            else "local_with_fallback" if fallback_aircraft_enabled
+            else "local_only"
+        )
+
+        eligible_local = [
+            item for item in filter_modes(
+                local_aircraft,
+                normal_enabled,
+                military_enabled,
+            )
+            if item.get("position_source") == "local"
+            and item.get("range") is not None
+            and 0 <= float(item["range"]) <= display_range
+            and is_fresh(
+                item.get("position_observed_at"),
+                POSITION_FRESH_SECONDS,
+                now=wall_clock(),
+            )
+        ]
+        fallback_poller.configure(
+            enabled=fallback_enabled,
+            provider=provider,
+            latitude=center_lat,
+            longitude=center_lon,
+            radius=display_range,
+            normal_enabled=normal_enabled,
+            military_enabled=military_enabled,
+        )
+        if not fallback_enabled:
+            fallback_poller.tick(active=False)
+        fallback_busy = fallback_poller.diagnostics()["in_flight"]
+
         remote_poller.configure(
-            enabled=remote_aircraft_enabled and not offline_mode_enabled,
+            enabled=continuous_remote and not fallback_busy,
             provider=provider,
             latitude=center_lat,
             longitude=center_lon,
             radius=MAX_COLLECTION_RANGE,
         )
-        remote_aircraft = remote_poller.tick()
+        remote_snapshot = remote_poller.tick()
+        remote_aircraft = remote_snapshot if continuous_remote else []
+        remote_busy = remote_poller.diagnostics()["in_flight"]
+        fallback_aircraft = fallback_poller.tick(
+            active=not eligible_local and not remote_busy
+        )
+        if fallback_enabled:
+            remote_aircraft = fallback_aircraft
 
         data = filter_modes(
             merge_aircraft(remote_aircraft, local_aircraft),
@@ -828,7 +888,11 @@ def run_collector(
         try:
             db.update_ac(
                 data,
-                authoritative_sources={"local"} if local_snapshot_succeeded else None,
+                authoritative_sources=(
+                    {"local", "remote_fallback_public", "remote_fallback_feeder"}
+                    if local_snapshot_succeeded
+                    else {"remote_fallback_public", "remote_fallback_feeder"}
+                ),
             )
         except TypeError as error:
             # Compatibility for small test/dry-run database adapters.
@@ -837,6 +901,7 @@ def run_collector(
             db.update_ac(data)
         now_wall = wall_clock()
         remote_diagnostics = remote_poller.diagnostics()
+        fallback_diagnostics = fallback_poller.diagnostics()
         status_values = dict(
             heartbeat_at=now_wall,
             local_snapshot_generated_at=local_snapshot_generated_at,
@@ -848,6 +913,17 @@ def run_collector(
             remote_next_retry_at=remote_diagnostics["next_retry_at"],
             remote_status=remote_diagnostics["status"],
             remote_error=remote_diagnostics["error"],
+            acquisition_policy=acquisition_policy,
+            eligible_local_position_count=len(eligible_local),
+            fallback_provider=fallback_diagnostics["provider"],
+            fallback_status=fallback_diagnostics["status"],
+            fallback_in_flight=int(fallback_diagnostics["in_flight"]),
+            fallback_last_attempt_at=fallback_diagnostics["last_attempt_at"],
+            fallback_last_success_at=fallback_diagnostics["last_success_at"],
+            fallback_next_request_at=fallback_diagnostics["next_request_at"],
+            fallback_http_status=fallback_diagnostics["http_status"],
+            fallback_error=fallback_diagnostics["error"],
+            fallback_request_count=fallback_diagnostics["request_count"],
             local_message_fresh_count=sum(
                 is_fresh(item.get("message_observed_at"), MESSAGE_FRESH_SECONDS, now=now_wall)
                 for item in local_aircraft
@@ -883,6 +959,7 @@ def run_collector(
         iterations += 1
         if max_iterations is not None and iterations >= max_iterations:
             remote_poller.shutdown()
+            fallback_poller.shutdown()
             return
         sleeper(LOCAL_RECEIVER_POLL_SECONDS)
 

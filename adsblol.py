@@ -13,7 +13,13 @@ from config import (
     POSITION_FRESH_SECONDS,
     REMOTE_REQUEST_TIMEOUT_SECONDS,
 )
-from freshness import finite_number, is_fresh, observation_time, valid_absolute_time
+from freshness import (
+    finite_number,
+    is_fresh,
+    observation_time,
+    provider_snapshot_seconds,
+    valid_absolute_time,
+)
 
 
 EARTH_RADIUS_NM = 3440.065
@@ -523,6 +529,10 @@ class ADSB_LOL:
             raise ValueError("adsb.lol response does not contain an aircraft list")
         normalized = dict(payload)
         normalized["ac"] = aircraft
+        normalized["now"] = provider_snapshot_seconds(
+            payload.get("now"),
+            provider,
+        )
         data = self._filter_format(
             data=normalized,
             max_range=range,
@@ -553,8 +563,13 @@ class ADSB_LOL:
             raise ValueError("adsb.lol response is not a JSON object")
         if not isinstance(payload.get("ac"), list):
             raise ValueError("adsb.lol response does not contain an aircraft list")
+        normalized = dict(payload)
+        normalized["now"] = provider_snapshot_seconds(
+            payload.get("now"),
+            "closest",
+        )
         return self._filter_format(
-            data=payload,
+            data=normalized,
             source="remote_closest",
             fetched_at=fetched_at,
             reference_lat=latitude,

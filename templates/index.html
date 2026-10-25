@@ -72,7 +72,7 @@
                 <section class="panel-section closest-panel">
                     <header class="panel-heading">
                         <span id="primary-heading">Nearest contact</span>
-                        <span class="live-status">Live</span>
+                        <span class="live-status is-neutral" id="primary-live-status">No live contact</span>
                     </header>
 
                     <h1 class="closest-callsign">
@@ -363,8 +363,20 @@
                             type="checkbox"
                         >
                         <span>
-                            <strong>Remote adsb.lol aircraft</strong>
-                            <small>Poll the selected geographic endpoint independently</small>
+                            <strong>Continuous remote adsb.lol aircraft</strong>
+                            <small>Poll the selected geographic endpoint even while local data is live</small>
+                        </span>
+                    </label>
+
+                    <label class="dialog-switch" for="fallback-aircraft-enabled">
+                        <input
+                            id="fallback-aircraft-enabled"
+                            name="fallback_aircraft_enabled"
+                            type="checkbox"
+                        >
+                        <span>
+                            <strong>Remote fallback when local is empty</strong>
+                            <small>Poll adsb.lol only without an eligible fresh local position</small>
                         </span>
                     </label>
 
@@ -381,7 +393,8 @@
                         </select>
                         <p class="receiver-help">
                             Feeder re-api authorization follows the backend's
-                            public IP. Public fallback is never automatic.
+                            public IP. Auto uses feeder re-api while this app
+                            is uploading; otherwise it uses the public API.
                         </p>
                     </div>
 

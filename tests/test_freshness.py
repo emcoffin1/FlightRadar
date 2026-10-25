@@ -173,13 +173,15 @@ class RemoteProviderTests(unittest.TestCase):
         client = ADSB_LOL(lat=33.5, lon=-117.1)
         with patch("adsblol.time.time", return_value=now):
             client._external_get = Mock(side_effect=[
-                self.response({"now": now, "ac": aircraft}),
+                self.response({"now": now * 1000, "ac": aircraft}),
                 self.response({"now": now, "aircraft": aircraft}),
             ])
             public = client.GET_point(50, provider="public")
             feeder = client.GET_point(50, provider="feeder")
         self.assertEqual(public[0]["position_source"], "remote_public")
         self.assertEqual(feeder[0]["position_source"], "remote_feeder")
+        self.assertEqual(public[0]["position_observed_at"], now - 2)
+        self.assertEqual(feeder[0]["position_observed_at"], now - 2)
         self.assertIn("/v2/point/", client._external_get.call_args_list[0].args[1])
         self.assertIn("?circle=33.5,-117.1,50", client._external_get.call_args_list[1].args[1])
 
@@ -187,7 +189,7 @@ class RemoteProviderTests(unittest.TestCase):
         now = 1_800_000_000
         client = ADSB_LOL()
         client._external_get = Mock(return_value=self.response({
-            "now": now,
+            "now": now * 1000,
             "ac": [{
                 "hex": "abc123", "flight": "CLOSE1", "lat": 34.01,
                 "lon": -118.01, "seen": 0, "seen_pos": 0,

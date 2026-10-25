@@ -353,6 +353,9 @@ const adsblolUploadInput = document.getElementById(
 const remoteAircraftInput = document.getElementById(
     "remote-aircraft-enabled"
 );
+const fallbackAircraftInput = document.getElementById(
+    "fallback-aircraft-enabled"
+);
 const remoteEndpointPreferenceInput = document.getElementById(
     "remote-endpoint-preference"
 );
@@ -477,6 +480,7 @@ function displayCoordinates(coordinates) {
         [offlineModeInput, "offline_mode_enabled"],
         [adsblolUploadInput, "adsblol_upload_enabled"],
         [remoteAircraftInput, "remote_aircraft_enabled"],
+        [fallbackAircraftInput, "fallback_aircraft_enabled"],
         [routeEnrichmentInput, "route_enrichment_enabled"],
         [externalTilesInput, "external_tiles_enabled"],
         [constrainedProfileInput, "constrained_profile_enabled"]
@@ -624,6 +628,7 @@ async function saveCoordinates(event) {
                 receiver_beast_port: Number(receiverBeastPortInput.value),
                 adsblol_upload_enabled: adsblolUploadInput.checked,
                 remote_aircraft_enabled: remoteAircraftInput.checked,
+                fallback_aircraft_enabled: fallbackAircraftInput.checked,
                 remote_endpoint_preference: remoteEndpointPreferenceInput.value,
                 route_enrichment_enabled: routeEnrichmentInput.checked,
                 external_tiles_enabled: externalTilesInput.checked,
@@ -730,6 +735,7 @@ for (const [input, setting, label] of [
     [offlineModeInput, "offline_mode_enabled", "Offline mode"],
     [adsblolUploadInput, "adsblol_upload_enabled", "adsb.lol upload"],
     [remoteAircraftInput, "remote_aircraft_enabled", "Remote aircraft"],
+    [fallbackAircraftInput, "fallback_aircraft_enabled", "Remote fallback"],
     [routeEnrichmentInput, "route_enrichment_enabled", "Route lookup"],
     [externalTilesInput, "external_tiles_enabled", "Map downloads"],
     [
@@ -852,6 +858,16 @@ function clearPrimaryAircraft() {
     setRouteAirportHighlights(null);
     primaryDetailHex = null;
     detailScheduler.clear();
+    displayLiveStatus(null);
+}
+
+function displayLiveStatus(aircraft, emptyText = "No live contact") {
+    const status = document.getElementById("primary-live-status");
+    const source = aircraft && (aircraft.position_source || aircraft.source);
+    const remote = Boolean(source && source !== "local");
+    status.textContent = aircraft ? "Live" : emptyText;
+    status.classList.toggle("is-remote", remote);
+    status.classList.toggle("is-neutral", !aircraft);
 }
 
 function displayAircraftImage(aircraft) {
@@ -971,6 +987,7 @@ function displayPrimaryAircraft(
     displayNumber("closest-range", aircraft.range, 1, " nm");
     displayNumber("closest-alt_baro", aircraft.alt_baro, 0, " ft");
     displayNumber("closest-gs", aircraft.gs, 1, " kt");
+    displayLiveStatus(aircraft);
     displayAircraftImage(aircraft);
     if (updateRoute) {
         displayRoute(aircraft, routeIsLoading);
@@ -1849,6 +1866,15 @@ async function updateAircraftDisplay() {
             document.getElementById("primary-heading").textContent =
                 "Nearest contact";
             clearPrimaryAircraft();
+            const fallbackState = response.headers.get("X-Acquisition-State");
+            const emptyStatus = {
+                requesting: "Requesting fallback",
+                stale: "Fallback stale",
+                rate_limited: "Fallback rate limited",
+                unauthorized: "Fallback unauthorized",
+                error: "Fallback unavailable"
+            }[fallbackState] || "No live contact";
+            displayLiveStatus(null, emptyStatus);
             renderAircraftList([], null);
             return;
         }
