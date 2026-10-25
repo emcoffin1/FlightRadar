@@ -96,45 +96,53 @@ class BasicDisplayTests(unittest.TestCase):
         self.assertIsNone(payload["aircraft"])
         self.assertTrue(payload["collector_fresh"])
 
-    def test_empty_snapshot_uses_online_closest_fallback(self):
+    def test_remote_database_position_is_orange(self):
+        with connect_database(self.path) as conn:
+            conn.execute("""
+                UPDATE adsb_data
+                SET source = 'local+remote_public',
+                    position_source = 'remote_public'
+                WHERE hex = 'near01'
+            """)
+        payload = self.client.get("/api/aircraft/nearest").get_json()
+        self.assertEqual(payload["aircraft"]["hex"], "near01")
+        self.assertEqual(payload["live_source"], "remote")
+
+    def test_empty_snapshot_reports_fallback_state(self):
         with connect_database(self.path) as conn:
             conn.execute("DELETE FROM adsb_data")
             conn.execute("""
-                UPDATE app_settings
-                SET remote_aircraft_enabled = 0, offline_mode_enabled = 1
+                UPDATE collector_status
+                SET fallback_status = 'requesting'
                 WHERE id = 1
             """)
-        fallback = {
-            "hex": "remote1", "callsign": "REMOTE1", "t": "BE95",
-            "r": "N95", "range": 8.5, "lat": 33.1, "lon": -118.1,
-            "alt_baro": 5000, "gs": 140, "track": 270,
-            "source": "remote_closest", "category": "Small Aircraft",
-            "position_observed_at": self.now,
-        }
-        with (
-            patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[fallback]) as tick,
-            patch.object(web_app, "resolve_aircraft_route", side_effect=lambda aircraft: aircraft),
-        ):
-            payload = self.client.get("/api/aircraft/nearest?online=1").get_json()
-        self.assertEqual(payload["aircraft"]["hex"], "remote1")
-        self.assertEqual(payload["live_source"], "adsblol_closest")
-        tick.assert_called_once()
+        payload = self.client.get("/api/aircraft/nearest").get_json()
+        self.assertIsNone(payload["aircraft"])
+        self.assertEqual(payload["display_state"], "requesting")
+        self.assertEqual(payload["status_message"], "Requesting fallback")
 
-    def test_closest_fallback_only_requires_online_browser(self):
+    def test_diagnostics_exposes_acquisition_and_position_provenance(self):
         with connect_database(self.path) as conn:
-            conn.execute("DELETE FROM adsb_data")
             conn.execute("""
-                UPDATE app_settings
-                SET remote_aircraft_enabled = 0, offline_mode_enabled = 1
+                UPDATE adsb_data
+                SET position_source = 'remote_fallback_public'
+                WHERE hex = 'near01'
+            """)
+            conn.execute("""
+                UPDATE collector_status
+                SET acquisition_policy = 'local_with_fallback',
+                    eligible_local_position_count = 0,
+                    fallback_provider = 'public',
+                    fallback_status = 'remote_fallback',
+                    fallback_request_count = 3
                 WHERE id = 1
             """)
-        with patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[]) as tick:
-            self.client.get("/api/aircraft/nearest?online=0")
-            tick.assert_not_called()
-
-        with patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[]) as tick:
-            self.client.get("/api/aircraft/nearest?online=1")
-            tick.assert_called_once()
+        payload = self.client.get("/api/diagnostics").get_json()
+        acquisition = payload["acquisition"]
+        self.assertEqual(acquisition["policy"], "local_with_fallback")
+        self.assertEqual(acquisition["provider"], "public")
+        self.assertEqual(acquisition["selected"]["position_source"], "remote_fallback_public")
+        self.assertEqual(acquisition["fallback"]["request_count"], 3)
 
     def test_basic_document_loads_only_lightweight_scripts(self):
         page = self.client.get("/basic").get_data(as_text=True)

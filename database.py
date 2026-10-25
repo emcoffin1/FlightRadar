@@ -18,6 +18,7 @@ from config import (
     DEFAULT_RECEIVER_BEAST_PORT,
     DEFAULT_REMOTE_ENDPOINT_PREFERENCE,
     DEFAULT_REMOTE_AIRCRAFT_ENABLED,
+    DEFAULT_FALLBACK_AIRCRAFT_ENABLED,
     DEFAULT_ROUTE_ENRICHMENT_ENABLED,
     DEFAULT_SEARCH_RANGE,
 )
@@ -225,6 +226,17 @@ def ensure_aircraft_schema(conn, *, create_table=False):
             remote_next_retry_at REAL,
             remote_status TEXT NOT NULL DEFAULT 'disabled',
             remote_error TEXT,
+            acquisition_policy TEXT NOT NULL DEFAULT 'local_only',
+            eligible_local_position_count INTEGER NOT NULL DEFAULT 0,
+            fallback_provider TEXT,
+            fallback_status TEXT NOT NULL DEFAULT 'disabled',
+            fallback_in_flight INTEGER NOT NULL DEFAULT 0,
+            fallback_last_attempt_at REAL,
+            fallback_last_success_at REAL,
+            fallback_next_request_at REAL,
+            fallback_http_status INTEGER,
+            fallback_error TEXT,
+            fallback_request_count INTEGER NOT NULL DEFAULT 0,
             local_message_fresh_count INTEGER NOT NULL DEFAULT 0,
             local_position_fresh_count INTEGER NOT NULL DEFAULT 0,
             remote_message_fresh_count INTEGER NOT NULL DEFAULT 0,
@@ -237,11 +249,25 @@ def ensure_aircraft_schema(conn, *, create_table=False):
         row[1]
         for row in conn.execute("PRAGMA table_info(collector_status)").fetchall()
     }
-    if "upload_relay_running" not in status_columns:
-        conn.execute(
-            "ALTER TABLE collector_status ADD COLUMN upload_relay_running "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
+    status_migrations = {
+        "upload_relay_running": "INTEGER NOT NULL DEFAULT 0",
+        "acquisition_policy": "TEXT NOT NULL DEFAULT 'local_only'",
+        "eligible_local_position_count": "INTEGER NOT NULL DEFAULT 0",
+        "fallback_provider": "TEXT",
+        "fallback_status": "TEXT NOT NULL DEFAULT 'disabled'",
+        "fallback_in_flight": "INTEGER NOT NULL DEFAULT 0",
+        "fallback_last_attempt_at": "REAL",
+        "fallback_last_success_at": "REAL",
+        "fallback_next_request_at": "REAL",
+        "fallback_http_status": "INTEGER",
+        "fallback_error": "TEXT",
+        "fallback_request_count": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, definition in status_migrations.items():
+        if name not in status_columns:
+            conn.execute(
+                f"ALTER TABLE collector_status ADD COLUMN {name} {definition}"
+            )
     conn.execute("""
         INSERT OR IGNORE INTO collector_status (id) VALUES (1)
     """)
@@ -357,6 +383,7 @@ def ensure_mode_settings(conn):
             adsblol_feed_enabled INTEGER NOT NULL DEFAULT 0,
             adsblol_upload_enabled INTEGER NOT NULL DEFAULT 0,
             remote_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
+            fallback_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
             route_enrichment_enabled INTEGER NOT NULL DEFAULT 0,
             external_tiles_enabled INTEGER NOT NULL DEFAULT 0,
             offline_mode_enabled INTEGER NOT NULL DEFAULT 0,
@@ -421,6 +448,7 @@ def ensure_mode_settings(conn):
     network_columns = {
         "adsblol_upload_enabled": int(DEFAULT_ADSB_LOL_FEED_ENABLED),
         "remote_aircraft_enabled": int(DEFAULT_REMOTE_AIRCRAFT_ENABLED),
+        "fallback_aircraft_enabled": int(DEFAULT_FALLBACK_AIRCRAFT_ENABLED),
         "route_enrichment_enabled": int(DEFAULT_ROUTE_ENRICHMENT_ENABLED),
         "external_tiles_enabled": int(DEFAULT_EXTERNAL_TILES_ENABLED),
         "offline_mode_enabled": 0,
@@ -496,6 +524,7 @@ def ensure_mode_settings(conn):
             adsblol_feed_enabled,
             adsblol_upload_enabled,
             remote_aircraft_enabled,
+            fallback_aircraft_enabled,
             route_enrichment_enabled,
             external_tiles_enabled,
             offline_mode_enabled,
@@ -503,7 +532,7 @@ def ensure_mode_settings(conn):
             network_settings_migrated,
             local_default_applied,
             remote_endpoint_preference
-        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
+        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
     """, (
         DEFAULT_LAT,
         DEFAULT_LON,
@@ -514,6 +543,7 @@ def ensure_mode_settings(conn):
         int(DEFAULT_ADSB_LOL_FEED_ENABLED),
         int(DEFAULT_ADSB_LOL_FEED_ENABLED),
         int(DEFAULT_REMOTE_AIRCRAFT_ENABLED),
+        int(DEFAULT_FALLBACK_AIRCRAFT_ENABLED),
         int(DEFAULT_ROUTE_ENRICHMENT_ENABLED),
         int(DEFAULT_EXTERNAL_TILES_ENABLED),
         0,
