@@ -555,7 +555,6 @@ class ADSB_LOL:
             raise ValueError("adsb.lol response does not contain an aircraft list")
         return self._filter_format(
             data=payload,
-            max_range=range,
             source="remote_closest",
             fetched_at=fetched_at,
             reference_lat=latitude,

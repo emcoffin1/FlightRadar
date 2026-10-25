@@ -96,12 +96,12 @@ class BasicDisplayTests(unittest.TestCase):
         self.assertIsNone(payload["aircraft"])
         self.assertTrue(payload["collector_fresh"])
 
-    def test_empty_snapshot_uses_online_closest_fallback_when_allowed(self):
+    def test_empty_snapshot_uses_online_closest_fallback(self):
         with connect_database(self.path) as conn:
             conn.execute("DELETE FROM adsb_data")
             conn.execute("""
                 UPDATE app_settings
-                SET remote_aircraft_enabled = 1, offline_mode_enabled = 0
+                SET remote_aircraft_enabled = 0, offline_mode_enabled = 1
                 WHERE id = 1
             """)
         fallback = {
@@ -120,27 +120,21 @@ class BasicDisplayTests(unittest.TestCase):
         self.assertEqual(payload["live_source"], "adsblol_closest")
         tick.assert_called_once()
 
-    def test_closest_fallback_respects_offline_browser_and_settings(self):
+    def test_closest_fallback_only_requires_online_browser(self):
         with connect_database(self.path) as conn:
             conn.execute("DELETE FROM adsb_data")
             conn.execute("""
                 UPDATE app_settings
-                SET remote_aircraft_enabled = 1, offline_mode_enabled = 0
+                SET remote_aircraft_enabled = 0, offline_mode_enabled = 1
                 WHERE id = 1
             """)
         with patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[]) as tick:
             self.client.get("/api/aircraft/nearest?online=0")
             tick.assert_not_called()
 
-        with connect_database(self.path) as conn:
-            conn.execute("UPDATE app_settings SET offline_mode_enabled = 1 WHERE id = 1")
-        with (
-            patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[]) as tick,
-            patch.object(web_app.closest_aircraft_fallback, "disable") as disable,
-        ):
+        with patch.object(web_app.closest_aircraft_fallback, "tick", return_value=[]) as tick:
             self.client.get("/api/aircraft/nearest?online=1")
-            tick.assert_not_called()
-            disable.assert_called_once()
+            tick.assert_called_once()
 
     def test_basic_document_loads_only_lightweight_scripts(self):
         page = self.client.get("/basic").get_data(as_text=True)

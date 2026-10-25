@@ -203,6 +203,21 @@ class RemoteProviderTests(unittest.TestCase):
             client._external_get.call_args.args[1],
         )
 
+    def test_closest_response_is_not_locally_radius_filtered(self):
+        now = 1_800_000_000
+        client = ADSB_LOL()
+        client._external_get = Mock(return_value=self.response({
+            "now": now,
+            "ac": [{
+                "hex": "far123", "lat": 35.0, "lon": -118.0,
+                "seen": 0, "seen_pos": 0,
+            }],
+        }))
+        with patch("adsblol.time.time", return_value=now):
+            aircraft = client.GET_closest(1, lat=34.0, lon=-118.0)
+        self.assertEqual(aircraft[0]["hex"], "far123")
+        self.assertGreater(aircraft[0]["range"], 1)
+
     def test_remote_message_age_is_enforced_independently(self):
         now = 1_800_000_000
         client = ADSB_LOL(lat=33.5, lon=-117.1)
