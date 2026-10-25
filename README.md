@@ -47,7 +47,9 @@ The coordinate dialog persists these independent settings in `aircraft.db`:
   relay are both enabled. Selecting `feeder` supports a feed managed elsewhere.
 - **External route lookup** permits background ADSBDB/HexDB lookups.
 - **Download map tiles** permits OpenStreetMap cache misses and revalidation.
-- **Offline mode** overrides every external option without disabling local data.
+- **Offline mode** overrides configured external options without disabling local
+  data. The automatic Basic-display closest fallback described below is the
+  deliberate exception and depends only on the browser's online state.
 - **Low-resource kiosk mode** disables continuous marker extrapolation and
   expensive map/icon filters while retaining one-second observations.
 
@@ -222,7 +224,9 @@ requested geographically with `?circle=LATITUDE,LONGITUDE,RADIUS_NM`. Its
 documented access path authorizes the feeder station's public IP. A station UUID
 is not an API credential. adsb.lol advertises receiver API keys, but its public
 documentation does not specify an authentication header or parameter, so this
-application does not guess one. There is no automatic public fallback.
+application does not guess one. The main remote collector has no automatic
+public fallback; the Basic display's separate closest lookup is described
+below.
 
 All remote requests originate from the Flask backend. Viewing through Tailscale
 does not move those requests to the phone, although an exit node, different
@@ -339,17 +343,19 @@ registration, reference image, departure/destination airport information,
 distance, altitude, ground speed and track. It automatically changes contact
 as aircraft move, expire or leave the configured range.
 Missing values are shown as dashes; stale or disconnected data clears the
-contact. Existing range and feed filters still apply. Basic has no settings
-dialog; return to Extra to change them.
+contact. The configured range applies to both the normal snapshot and closest
+request. Basic has no settings dialog; return to Extra to change its location
+or range.
 
 If that normal aircraft snapshot is empty, the browser reports whether it is
 online and the backend can fall back to adsb.lol's closest-aircraft endpoint.
 The fallback is shared across open displays and runs at most once every 15
-seconds (`ADSB_LOL_CLOSEST_POLL_SECONDS` in `config.py`). It only runs when
-**Remote adsb.lol aircraft** is enabled and **Offline mode** is off; it never
-uploads receiver data. Local aircraft immediately take priority again. The
-Basic **Live** label is green for the normal snapshot and orange while showing
-the closest-aircraft fallback.
+seconds (`ADSB_LOL_CLOSEST_POLL_SECONDS` in `config.py`). This emergency
+fallback depends only on the Basic browser reporting that it is online; the
+normal remote-aircraft and Offline-mode settings do not control it. It calls
+adsb.lol's closest endpoint only and never uploads receiver data. Local
+aircraft immediately take priority again. The Basic **Live** label is green
+for the normal snapshot and orange while showing the closest-aircraft fallback.
 
 Basic loads system fonts and at most one local aircraft reference image: no
 Leaflet, tiles, aircraft icons, trails or animation loop. It uses the existing
@@ -362,7 +368,7 @@ collector heartbeat becomes stale, even if the next request hangs.
 
 This switches the browser view only. Collection, optional feeding, configured
 remote polling, and history recording continue in the backend. It does not
-silently change network permissions. To launch the kiosk directly in Basic,
+change any persisted network settings. To launch the kiosk directly in Basic,
 use `http://127.0.0.1:5000/basic` as Cog's URL; no receiver changes are needed.
 
 ## Display performance review (October 2026)

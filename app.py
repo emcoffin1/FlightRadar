@@ -991,8 +991,7 @@ def get_nearest_aircraft():
         )
         row = None
         settings = conn.execute("""
-            SELECT center_lat, center_lon, search_range_nm,
-                remote_aircraft_enabled, offline_mode_enabled
+            SELECT center_lat, center_lon, search_range_nm
             FROM app_settings
             WHERE id = 1
         """).fetchone()
@@ -1017,15 +1016,8 @@ def get_nearest_aircraft():
         aircraft = resolve_aircraft_route(dict(row))
         live_source = "local" if aircraft.get("source") == "local" else "remote"
     else:
-        network_allowed = (
-            settings is not None
-            and bool(settings["remote_aircraft_enabled"])
-            and not bool(settings["offline_mode_enabled"])
-        )
         browser_online = request.args.get("online") == "1"
-        if not network_allowed:
-            closest_aircraft_fallback.disable()
-        elif browser_online:
+        if browser_online and settings is not None:
             fallback = closest_aircraft_fallback.tick(
                 latitude=settings["center_lat"],
                 longitude=settings["center_lon"],
