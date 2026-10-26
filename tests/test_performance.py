@@ -153,9 +153,33 @@ class NetworkSettingsTests(unittest.TestCase):
 
         self.assertTrue(row["adsblol_upload_enabled"])
         self.assertTrue(row["remote_aircraft_enabled"])
-        self.assertFalse(row["fallback_aircraft_enabled"])
+        self.assertTrue(row["fallback_aircraft_enabled"])
         self.assertFalse(row["route_enrichment_enabled"])
         self.assertFalse(row["external_tiles_enabled"])
+
+    def test_fallback_default_is_applied_once_and_remains_user_controllable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.db"
+            with connect_database(path, rows=True) as conn:
+                ensure_mode_settings(conn)
+                first = conn.execute(
+                    "SELECT fallback_aircraft_enabled "
+                    "FROM app_settings WHERE id = 1"
+                ).fetchone()
+                self.assertTrue(first["fallback_aircraft_enabled"])
+
+                conn.execute("""
+                    UPDATE app_settings
+                    SET fallback_aircraft_enabled = 0
+                    WHERE id = 1
+                """)
+                ensure_mode_settings(conn)
+                second = conn.execute(
+                    "SELECT fallback_aircraft_enabled "
+                    "FROM app_settings WHERE id = 1"
+                ).fetchone()
+
+        self.assertFalse(second["fallback_aircraft_enabled"])
 
     def test_offline_missing_tile_performs_no_external_request(self):
         with tempfile.TemporaryDirectory() as directory:

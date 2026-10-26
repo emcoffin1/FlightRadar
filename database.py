@@ -383,13 +383,14 @@ def ensure_mode_settings(conn):
             adsblol_feed_enabled INTEGER NOT NULL DEFAULT 0,
             adsblol_upload_enabled INTEGER NOT NULL DEFAULT 0,
             remote_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
-            fallback_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
+            fallback_aircraft_enabled INTEGER NOT NULL DEFAULT 1,
             route_enrichment_enabled INTEGER NOT NULL DEFAULT 0,
             external_tiles_enabled INTEGER NOT NULL DEFAULT 0,
             offline_mode_enabled INTEGER NOT NULL DEFAULT 0,
             constrained_profile_enabled INTEGER NOT NULL DEFAULT 1,
             network_settings_migrated INTEGER NOT NULL DEFAULT 1,
             local_default_applied INTEGER NOT NULL DEFAULT 1,
+            fallback_default_applied INTEGER NOT NULL DEFAULT 1,
             remote_endpoint_preference TEXT NOT NULL DEFAULT 'auto'
         )
     """)
@@ -505,6 +506,20 @@ def ensure_mode_settings(conn):
         WHERE local_default_applied = 0
     """)
 
+    # Enable loss-of-local fallback once for existing installations. The
+    # marker ensures a later user choice to disable it remains respected.
+    if "fallback_default_applied" not in columns:
+        conn.execute(
+            "ALTER TABLE app_settings "
+            "ADD COLUMN fallback_default_applied INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute("""
+        UPDATE app_settings
+        SET fallback_aircraft_enabled = 1,
+            fallback_default_applied = 1
+        WHERE fallback_default_applied = 0
+    """)
+
     conn.execute("""
         UPDATE app_settings
         SET search_range_nm = ?
@@ -531,8 +546,9 @@ def ensure_mode_settings(conn):
             constrained_profile_enabled,
             network_settings_migrated,
             local_default_applied,
+            fallback_default_applied,
             remote_endpoint_preference
-        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
+        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?)
     """, (
         DEFAULT_LAT,
         DEFAULT_LON,
