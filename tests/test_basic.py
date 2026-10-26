@@ -170,6 +170,17 @@ class BasicDisplayTests(unittest.TestCase):
         )
         self.assertIn("#registration { flex: 0 0 auto; white-space: nowrap;", stylesheet)
 
+    def test_callsign_is_sized_to_remain_on_one_line(self):
+        root = Path(__file__).resolve().parents[1]
+        stylesheet = (root / "static" / "basic.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "font-size: clamp(32px, 8vw, 120px)",
+            stylesheet,
+        )
+        self.assertIn("white-space: nowrap", stylesheet)
+
 
 if __name__ == "__main__":
     unittest.main()
