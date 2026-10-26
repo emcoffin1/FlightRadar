@@ -17,6 +17,14 @@
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed.toFixed(decimals) : null;
     };
+    const trackDirection = (value) => {
+        if (value === null || value === undefined || value === "") return null;
+        const degrees = Number(value);
+        if (!Number.isFinite(degrees)) return null;
+        const directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+        const normalized = ((degrees % 360) + 360) % 360;
+        return directions[Math.floor((normalized + 22.5) / 45) % directions.length];
+    };
     const missing = (value) => value === null || value === undefined ||
         value === "" || value === "NA" || value === "N/A";
     function clearImage() {
@@ -107,7 +115,7 @@
         set("distance", number(aircraft.range, 1));
         set("altitude", aircraft.alt_baro === "ground" ? "Ground" : number(aircraft.alt_baro));
         set("speed", number(aircraft.gs));
-        set("track", number(aircraft.track));
+        set("track", trackDirection(aircraft.track));
         set("hex", aircraft.hex.toUpperCase());
         renderImage(aircraft);
         renderRoute(aircraft);

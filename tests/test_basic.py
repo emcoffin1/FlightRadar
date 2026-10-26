@@ -149,6 +149,8 @@ class BasicDisplayTests(unittest.TestCase):
         self.assertIn("basic.js", page)
         self.assertIn('id="aircraft-image"', page)
         self.assertIn('aria-label="Airport locations"', page)
+        self.assertIn('<dt>Track</dt><dd><span id="track">—</span></dd>', page)
+        self.assertNotIn('<span id="track">—</span> <small>°</small>', page)
         for heavy_resource in ["leaflet.js", "dashboard.js", "detail_scheduler.js", "aircraft_photos", "fonts/"]:
             self.assertNotIn(heavy_resource, page)
         self.assertIn('href="/extra"', page)
