@@ -24,6 +24,38 @@ from config import (
 )
 
 
+COLLECTOR_STATUS_COLUMN_DEFINITIONS = {
+    "heartbeat_at": "REAL",
+    "local_snapshot_generated_at": "REAL",
+    "local_fetched_at": "REAL",
+    "local_error": "TEXT",
+    "remote_provider": "TEXT",
+    "remote_last_success_at": "REAL",
+    "remote_snapshot_generated_at": "REAL",
+    "remote_next_retry_at": "REAL",
+    "remote_status": "TEXT NOT NULL DEFAULT 'disabled'",
+    "remote_error": "TEXT",
+    "acquisition_policy": "TEXT NOT NULL DEFAULT 'local_only'",
+    "eligible_local_position_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_provider": "TEXT",
+    "fallback_status": "TEXT NOT NULL DEFAULT 'disabled'",
+    "fallback_in_flight": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_last_attempt_at": "REAL",
+    "fallback_last_success_at": "REAL",
+    "fallback_next_request_at": "REAL",
+    "fallback_http_status": "INTEGER",
+    "fallback_error": "TEXT",
+    "fallback_request_count": "INTEGER NOT NULL DEFAULT 0",
+    "local_message_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "local_position_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_message_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_position_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "rejected_stale_positions": "INTEGER NOT NULL DEFAULT 0",
+    "upload_relay_running": "INTEGER NOT NULL DEFAULT 0",
+}
+COLLECTOR_STATUS_FIELDS = frozenset(COLLECTOR_STATUS_COLUMN_DEFINITIONS)
+
+
 def decode_database_flags(value):
     """Decode tar1090-db's least-significant-bit-first flag string."""
     return sum(
@@ -199,6 +231,10 @@ def ensure_aircraft_schema(conn, *, create_table=False):
         ON adsb_data (lower(hex))
     """)
     conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_adsb_data_hex
+        ON adsb_data (hex)
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS route_cache (
             callsign TEXT PRIMARY KEY,
             airline TEXT,
@@ -213,57 +249,21 @@ def ensure_aircraft_schema(conn, *, create_table=False):
             updated_at REAL NOT NULL
         )
     """)
-    conn.execute("""
+    status_definitions = ",\n            ".join(
+        f"{name} {definition}"
+        for name, definition in COLLECTOR_STATUS_COLUMN_DEFINITIONS.items()
+    )
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS collector_status (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            heartbeat_at REAL,
-            local_snapshot_generated_at REAL,
-            local_fetched_at REAL,
-            local_error TEXT,
-            remote_provider TEXT,
-            remote_last_success_at REAL,
-            remote_snapshot_generated_at REAL,
-            remote_next_retry_at REAL,
-            remote_status TEXT NOT NULL DEFAULT 'disabled',
-            remote_error TEXT,
-            acquisition_policy TEXT NOT NULL DEFAULT 'local_only',
-            eligible_local_position_count INTEGER NOT NULL DEFAULT 0,
-            fallback_provider TEXT,
-            fallback_status TEXT NOT NULL DEFAULT 'disabled',
-            fallback_in_flight INTEGER NOT NULL DEFAULT 0,
-            fallback_last_attempt_at REAL,
-            fallback_last_success_at REAL,
-            fallback_next_request_at REAL,
-            fallback_http_status INTEGER,
-            fallback_error TEXT,
-            fallback_request_count INTEGER NOT NULL DEFAULT 0,
-            local_message_fresh_count INTEGER NOT NULL DEFAULT 0,
-            local_position_fresh_count INTEGER NOT NULL DEFAULT 0,
-            remote_message_fresh_count INTEGER NOT NULL DEFAULT 0,
-            remote_position_fresh_count INTEGER NOT NULL DEFAULT 0,
-            rejected_stale_positions INTEGER NOT NULL DEFAULT 0,
-            upload_relay_running INTEGER NOT NULL DEFAULT 0
+            {status_definitions}
         )
     """)
     status_columns = {
         row[1]
         for row in conn.execute("PRAGMA table_info(collector_status)").fetchall()
     }
-    status_migrations = {
-        "upload_relay_running": "INTEGER NOT NULL DEFAULT 0",
-        "acquisition_policy": "TEXT NOT NULL DEFAULT 'local_only'",
-        "eligible_local_position_count": "INTEGER NOT NULL DEFAULT 0",
-        "fallback_provider": "TEXT",
-        "fallback_status": "TEXT NOT NULL DEFAULT 'disabled'",
-        "fallback_in_flight": "INTEGER NOT NULL DEFAULT 0",
-        "fallback_last_attempt_at": "REAL",
-        "fallback_last_success_at": "REAL",
-        "fallback_next_request_at": "REAL",
-        "fallback_http_status": "INTEGER",
-        "fallback_error": "TEXT",
-        "fallback_request_count": "INTEGER NOT NULL DEFAULT 0",
-    }
-    for name, definition in status_migrations.items():
+    for name, definition in COLLECTOR_STATUS_COLUMN_DEFINITIONS.items():
         if name not in status_columns:
             conn.execute(
                 f"ALTER TABLE collector_status ADD COLUMN {name} {definition}"

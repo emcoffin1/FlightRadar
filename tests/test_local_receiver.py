@@ -89,12 +89,14 @@ class LocalDataTests(unittest.TestCase):
         remote = [{
             "hex": "abc123", "lat": 1, "lon": 2, "t": "C17",
             "r": "01-0001", "flag": ["Military"],
-            "position_observed_at": 100,
+            "range": 10, "position_observed_at": 100,
+            "position_source": "remote_public",
         }]
         local = [{
             "hex": "abc123", "lat": 3, "lon": 4, "t": "NA",
             "r": "NA", "flag": ["NA"],
-            "position_observed_at": 200,
+            "range": 5, "position_observed_at": 200,
+            "position_source": "local",
         }]
         result = merge_aircraft(remote, local)[0]
         self.assertEqual((result["lat"], result["lon"]), (3, 4))
