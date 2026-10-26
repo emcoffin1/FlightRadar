@@ -57,6 +57,19 @@ def prepare_database(path, callsign="EXA123"):
 
 
 class DatabaseLifecycleTests(unittest.TestCase):
+    def test_application_starts_only_one_collector_thread(self):
+        thread = Mock()
+        thread.is_alive.return_value = True
+        with (
+            patch.object(web_app, "collector_thread", None),
+            patch.object(web_app, "Thread", return_value=thread) as thread_class,
+        ):
+            web_app.start_aircraft_collector()
+            web_app.start_aircraft_collector()
+
+        thread_class.assert_called_once()
+        thread.start.assert_called_once_with()
+
     def test_connection_commits_and_closes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lifecycle.db"
@@ -461,6 +474,32 @@ class CollectorAndHistoryTests(unittest.TestCase):
             "source_fetched_at": now,
             "source": "local",
         }
+
+    def test_collector_stop_event_closes_owned_resources(self):
+        stop_event = Mock()
+        stop_event.is_set.return_value = True
+        feeder = Mock()
+        remote_poller = Mock()
+        fallback_poller = Mock()
+        with (
+            patch.object(collector, "Database") as database,
+            patch.object(
+                collector, "ADSBLolFeeder", return_value=feeder
+            ),
+            patch.object(
+                collector, "RemoteAircraftPoller", return_value=remote_poller
+            ),
+            patch.object(
+                collector, "ClosestAircraftFallback",
+                return_value=fallback_poller,
+            ),
+        ):
+            collector.run_collector(stop_event=stop_event)
+
+        database.return_value.get_collection_settings.assert_not_called()
+        feeder.stop.assert_called_once_with()
+        remote_poller.shutdown.assert_called_once_with()
+        fallback_poller.shutdown.assert_called_once_with()
 
     def test_history_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:

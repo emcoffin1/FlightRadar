@@ -11,7 +11,12 @@ import requests
 import app as web_app
 from adsblol import ADSB_LOL
 from config import POSITION_FRESH_SECONDS, REMOTE_RETRY_MIN_SECONDS
-from database import connect_database, ensure_aircraft_schema, ensure_mode_settings
+from database import (
+    COLLECTOR_STATUS_FIELDS,
+    connect_database,
+    ensure_aircraft_schema,
+    ensure_mode_settings,
+)
 from local_receiver import ADSBLolFeeder, LocalReceiver
 from temp import Database, RemoteAircraftPoller, merge_aircraft
 
@@ -134,8 +139,10 @@ class TimestampSemanticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "segments.db")
             now = time.time()
-            database.update_ac([formatted_aircraft(now, lat=33.5)])
-            database.update_ac([formatted_aircraft(now + 201, lat=33.51)])
+            with patch("temp.time", return_value=now):
+                database.update_ac([formatted_aircraft(now, lat=33.5)])
+            with patch("temp.time", return_value=now + 201):
+                database.update_ac([formatted_aircraft(now + 201, lat=33.51)])
             with database.connect() as conn:
                 segments = [row[0] for row in conn.execute(
                     "SELECT segment_id FROM aircraft_positions ORDER BY id"
@@ -146,15 +153,108 @@ class TimestampSemanticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "jump.db")
             now = time.time()
-            database.update_ac([formatted_aircraft(now, lat=33.5, lon=-117.1)])
-            database.update_ac([
-                formatted_aircraft(now + 6, lat=38.5, lon=-122.1)
-            ])
+            with patch("temp.time", return_value=now):
+                database.update_ac([
+                    formatted_aircraft(now, lat=33.5, lon=-117.1)
+                ])
+            with patch("temp.time", return_value=now + 6):
+                database.update_ac([
+                    formatted_aircraft(now + 6, lat=38.5, lon=-122.1)
+                ])
             with database.connect() as conn:
                 segments = [row[0] for row in conn.execute(
                     "SELECT segment_id FROM aircraft_positions ORDER BY id"
                 )]
         self.assertEqual(segments, [1, 2])
+
+    def test_older_remote_position_cannot_mix_with_newer_local_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "position.db")
+            now = time.time()
+            local = formatted_aircraft(
+                now, lat=33.5, lon=-117.1, range=2, alt_baro=1200,
+                track=90, gs=110, source="local", position_source="local",
+            )
+            remote = formatted_aircraft(
+                now - 5, lat=40, lon=-70, range=900, alt_baro=30000,
+                track=270, gs=500, source="remote_public",
+                position_source="remote_public",
+            )
+            with patch("temp.time", return_value=now):
+                database.update_ac([local])
+                database.update_ac([remote])
+            with database.connect() as conn:
+                row = conn.execute("""
+                    SELECT lat, lon, range, alt_baro, track, gs,
+                        position_observed_at, position_source
+                    FROM adsb_data
+                """).fetchone()
+
+        self.assertEqual(
+            tuple(row),
+            (33.5, -117.1, 2.0, 1200, 90.0, 110.0, now, "local"),
+        )
+
+    def test_equal_timestamp_prefers_local_and_newer_local_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "sources.db")
+            now = time.time()
+            remote = formatted_aircraft(
+                now, lat=34, lon=-118, range=5,
+                source="remote_fallback_public",
+                position_source="remote_fallback_public",
+            )
+            local = formatted_aircraft(
+                now, lat=33, lon=-117, range=1,
+                source="local", position_source="local",
+            )
+            delayed_remote = formatted_aircraft(
+                now, lat=35, lon=-119, range=10,
+                source="remote_public", position_source="remote_public",
+            )
+            recovered_local = formatted_aircraft(
+                now + 1, lat=32, lon=-116, range=0.5,
+                source="local", position_source="local",
+            )
+            with patch("temp.time", return_value=now + 1):
+                database.update_ac([remote])
+                database.update_ac([local])
+                database.update_ac([delayed_remote])
+                database.update_ac([recovered_local])
+            with database.connect() as conn:
+                row = conn.execute("""
+                    SELECT lat, lon, range, position_observed_at,
+                        position_source
+                    FROM adsb_data
+                """).fetchone()
+
+        self.assertEqual(
+            tuple(row),
+            (32.0, -116.0, 0.5, now + 1, "local"),
+        )
+
+    def test_stale_or_invalid_position_is_never_inserted_as_live(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "invalid.db")
+            now = time.time()
+            stale = formatted_aircraft(
+                now - POSITION_FRESH_SECONDS - 1,
+                lat=91,
+                lon=float("nan"),
+                range=-1,
+                source="remote_public",
+                position_source="remote_public",
+            )
+            with patch("temp.time", return_value=now):
+                database.update_ac([stale])
+            with database.connect() as conn:
+                row = conn.execute("""
+                    SELECT lat, lon, range, position_observed_at,
+                        position_source
+                    FROM adsb_data
+                """).fetchone()
+
+        self.assertEqual(tuple(row), (None, None, None, None, None))
 
 
 class RemoteProviderTests(unittest.TestCase):
@@ -184,6 +284,79 @@ class RemoteProviderTests(unittest.TestCase):
         self.assertEqual(feeder[0]["position_observed_at"], now - 2)
         self.assertIn("/v2/point/", client._external_get.call_args_list[0].args[1])
         self.assertIn("?circle=33.5,-117.1,50", client._external_get.call_args_list[1].args[1])
+
+    def test_malformed_aircraft_is_isolated_and_fields_are_normalized(self):
+        now = 1_800_000_000
+        client = ADSB_LOL(lat=33.5, lon=-117.1)
+        payload = {
+            "now": now,
+            "ac": [
+                None,
+                {"hex": "", "seen": 0},
+                {"hex": "old123", "seen": "not-a-number"},
+                {
+                    "hex": 123456,
+                    "flight": 789,
+                    "seen": 0,
+                    "seen_pos": 0,
+                    "lat": 91,
+                    "lon": float("inf"),
+                    "alt_baro": float("nan"),
+                    "track": float("inf"),
+                    "gs": -1,
+                    "t": None,
+                    "r": None,
+                },
+                {
+                    "hex": "GOOD01",
+                    "flight": " SAFE1 ",
+                    "seen": 0,
+                    "seen_pos": 0,
+                    "lat": 0,
+                    "lon": 0,
+                    "track": 450,
+                    "gs": "120.5",
+                    "alt_baro": "ground",
+                },
+            ],
+        }
+
+        result = client._filter_format(
+            payload,
+            fetched_at=now,
+            source="remote_public",
+        )
+
+        self.assertEqual([item["hex"] for item in result], ["123456", "good01"])
+        malformed = result[0]
+        self.assertEqual(malformed["callsign"], "789")
+        self.assertIsNone(malformed["lat"])
+        self.assertIsNone(malformed["position_observed_at"])
+        self.assertEqual(malformed["alt_baro"], "NA")
+        self.assertEqual(malformed["track"], "NA")
+        self.assertEqual(malformed["gs"], "NA")
+        valid = result[1]
+        self.assertEqual((valid["lat"], valid["lon"]), (0.0, 0.0))
+        self.assertEqual(valid["track"], 90.0)
+        self.assertEqual(valid["gs"], 120.5)
+        self.assertEqual(valid["alt_baro"], "ground")
+
+    def test_malformed_top_level_and_query_coordinates_are_rejected(self):
+        client = ADSB_LOL()
+        with self.assertRaisesRegex(ValueError, "not a JSON object"):
+            client._filter_format([], fetched_at=1_800_000_000)
+        for latitude, longitude, radius in (
+            (float("nan"), 0, 10),
+            (91, 0, 10),
+            (0, 181, 10),
+            (0, 0, float("inf")),
+            (0, 0, 0),
+        ):
+            with self.subTest(
+                latitude=latitude, longitude=longitude, radius=radius
+            ):
+                with self.assertRaises(ValueError):
+                    client.GET_point(radius, lat=latitude, lon=longitude)
 
     def test_closest_uses_explicit_location_and_marks_source(self):
         now = 1_800_000_000
@@ -406,6 +579,77 @@ class RemoteProviderTests(unittest.TestCase):
 
 
 class ReadPathFreshnessTests(unittest.TestCase):
+    def test_fallback_diagnostics_persist_to_headers_and_both_apis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "diagnostics.db"
+            database = Database(path)
+            now = time.time()
+
+            def isolated_connection(*, rows=False):
+                return connect_database(path, rows=rows)
+
+            with patch.object(web_app, "connect_database", isolated_connection):
+                client = web_app.app.test_client()
+                for status in (
+                    "requesting", "remote_fallback", "stale",
+                    "rate_limited", "unauthorized", "error", "local",
+                    "disabled",
+                ):
+                    with self.subTest(status=status):
+                        database.update_collector_status(
+                            heartbeat_at=now,
+                            acquisition_policy="local_with_fallback",
+                            eligible_local_position_count=0,
+                            fallback_provider="public",
+                            fallback_status=status,
+                            fallback_in_flight=int(status == "requesting"),
+                            fallback_last_attempt_at=now - 1,
+                            fallback_last_success_at=now - 2,
+                            fallback_next_request_at=now + 15,
+                            fallback_http_status=429 if status == "rate_limited" else 200,
+                            fallback_error="test error" if status == "error" else None,
+                            fallback_request_count=7,
+                        )
+                        aircraft = client.get("/api/aircraft")
+                        nearest = client.get("/api/aircraft/nearest").get_json()
+                        diagnostics = client.get("/api/diagnostics").get_json()
+
+                        self.assertEqual(
+                            aircraft.headers["X-Acquisition-State"], status
+                        )
+                        self.assertEqual(nearest["fallback_status"], status)
+                        self.assertEqual(
+                            diagnostics["acquisition"]["fallback"]["status"],
+                            status,
+                        )
+                        self.assertEqual(
+                            diagnostics["acquisition"]["fallback"]["request_count"],
+                            7,
+                        )
+
+    def test_existing_collector_status_table_gets_every_supported_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "migration.db"
+            with connect_database(path) as conn:
+                conn.execute("""
+                    CREATE TABLE collector_status (
+                        id INTEGER PRIMARY KEY,
+                        heartbeat_at REAL
+                    )
+                """)
+                conn.execute("INSERT INTO collector_status VALUES (1, NULL)")
+
+            Database(path)
+            with connect_database(path) as conn:
+                columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(collector_status)"
+                    ).fetchall()
+                }
+
+        self.assertTrue(COLLECTOR_STATUS_FIELDS.issubset(columns))
+
     def test_stopped_collector_cannot_serve_live_aircraft_forever(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "api.db"

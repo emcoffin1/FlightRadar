@@ -16,7 +16,7 @@ from math import (
 )
 import os
 import re
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 import time
 
 import requests
@@ -85,6 +85,7 @@ def lookup_aircraft_route(callsign, aircraft_hex):
 
 route_coordinator = RouteLookupCoordinator(lookup_aircraft_route)
 collector_thread = None
+collector_stop_event = Event()
 airport_data_lock = Lock()
 frontend_diagnostics_lock = Lock()
 frontend_diagnostics_state = {
@@ -107,14 +108,22 @@ def start_aircraft_collector():
     if collector_thread is not None and collector_thread.is_alive():
         return
 
+    collector_stop_event.clear()
     collector_thread = Thread(
         target=run_collector,
         args=(adsb_client,),
+        kwargs={"stop_event": collector_stop_event},
         name="aircraft-collector",
         daemon=True,
     )
     collector_thread.start()
     LOGGER.info("Aircraft collector started")
+
+
+def stop_aircraft_collector():
+    collector_stop_event.set()
+    if collector_thread is not None and collector_thread.is_alive():
+        collector_thread.join(timeout=3)
 
 
 def ensure_airport_schema(conn):
@@ -1512,12 +1521,10 @@ route_coordinator.set_external_enabled(
 
 
 if __name__ == "__main__":
-    # Werkzeug's debug reloader runs this module once in a supervisor and once
-    # in the server process. Start the collector only in the server process so
-    # there is never a duplicate set of ADS-B API requests.
-    # if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-    #     start_aircraft_collector()
+    # The directly supervised Flask process is the sole collector owner.
+    # Importing this module from another WSGI worker never starts a collector.
     start_aircraft_collector()
-
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
-    # app.run(debug=True)
+    try:
+        app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    finally:
+        stop_aircraft_collector()
