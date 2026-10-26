@@ -18,7 +18,7 @@ body[data-live="true"][data-live-source="remote"] #status { color: #e89a3c; }
 .contact { align-self: center; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 30vw); align-items: center; gap: clamp(18px, 4vw, 52px); }
 body[data-image="false"] .contact { grid-template-columns: minmax(0, 1fr); }
 .identity { min-width: 0; }
-h1 { margin: 0; font-size: clamp(36px, 10vw, 150px); line-height: 1.1; letter-spacing: .025em; overflow-wrap: anywhere; font-weight: 600; }
+h1 { max-width: 100%; margin: 0; font-size: clamp(32px, 8vw, 120px); line-height: 1.1; letter-spacing: .015em; white-space: nowrap; font-weight: 600; }
 .identity p { display: flex; flex-wrap: nowrap; align-items: baseline; gap: 12px 28px; margin: 12px 0 0; font-size: clamp(18px, 4vw, 38px); }
 #type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d6a04b; }
 #registration { flex: 0 0 auto; white-space: nowrap; color: #aaa69c; }
