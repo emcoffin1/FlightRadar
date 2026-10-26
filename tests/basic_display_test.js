@@ -71,6 +71,7 @@ function payload(hex = "abc123", updates = {}) {
     assert.equal(view.nodes.callsign.textContent, "TEST1");
     assert.equal(view.nodes.altitude.textContent, "0");
     assert.equal(view.nodes.speed.textContent, "—");
+    assert.equal(view.nodes.track.textContent, "N");
     assert.equal(view.nodes["aircraft-image"].src, "/static/aircraft_photos/c172.webp");
     assert.equal(view.nodes["aircraft-image"].hidden, false);
     assert.equal(view.nodes.departure.textContent, "LAX");
@@ -120,5 +121,23 @@ function payload(hex = "abc123", updates = {}) {
     assert.equal(remote.nodes.source.textContent, "Remote source");
     assert.equal(remote.document.body.dataset.liveSource, "remote");
     remote.events.pagehide();
+
+    const compass = harness();
+    const directions = [
+        [0, "N"], [45, "NE"], [90, "E"], [135, "SE"],
+        [180, "S"], [225, "SW"], [270, "W"], [315, "NW"]
+    ];
+    for (let index = 0; index < directions.length; index++) {
+        const [track, direction] = directions[index];
+        compass.requests[index].reply(payload("abc123", {track}));
+        await flush();
+        assert.equal(compass.nodes.track.textContent, direction);
+        if (index < directions.length - 1) await compass.tick(2000);
+    }
+    await compass.tick(2000);
+    compass.requests[directions.length].reply(payload("abc123", {track: null}));
+    await flush();
+    assert.equal(compass.nodes.track.textContent, "—");
+    compass.events.pagehide();
     console.log("Basic display: rendering, freshness, timeout, single-flight and lifecycle checks passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

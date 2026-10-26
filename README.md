@@ -342,6 +342,8 @@ Basic fills the screen with the nearest fresh aircraft's callsign, type,
 registration, reference image, departure/destination airport information,
 distance, altitude, ground speed and track. It automatically changes contact
 as aircraft move, expire or leave the configured range.
+Track is shown as one of eight compass directions (N, NE, E, SE, S, SW, W or
+NW) instead of a numeric angle.
 Missing values are shown as dashes; stale or disconnected data clears the
 contact. The configured range applies to both the normal snapshot and closest
 request. Basic has no settings dialog; return to Extra to change its location
