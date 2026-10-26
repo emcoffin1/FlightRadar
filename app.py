@@ -775,7 +775,7 @@ def map_tile(z, x, y):
     return serve_cached_tile(tile_path, cache_seconds, cache_status="MISS")
 
 
-@app.route("/")
+@app.route("/extra")
 def hello_world():
     with connect_database(rows=True) as conn:
         coordinates = conn.execute("""
@@ -969,6 +969,7 @@ def get_all_aircraft():
     return response
 
 
+@app.route("/")
 @app.route("/basic")
 def basic_display():
     return render_template(

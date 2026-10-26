@@ -151,7 +151,22 @@ class BasicDisplayTests(unittest.TestCase):
         self.assertIn('aria-label="Airport locations"', page)
         for heavy_resource in ["leaflet.js", "dashboard.js", "detail_scheduler.js", "aircraft_photos", "fonts/"]:
             self.assertNotIn(heavy_resource, page)
-        self.assertIn('href="/"', page)
+        self.assertIn('href="/extra"', page)
+
+    def test_root_boots_into_reversionary_display(self):
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("Nearest aircraft", page)
+        self.assertIn('href="/extra"', page)
+
+        extra = self.client.get("/extra").get_data(as_text=True)
+        self.assertIn('aria-label="Switch to Basic display"', extra)
+
+    def test_registration_is_reserved_a_single_line(self):
+        root = Path(__file__).resolve().parents[1]
+        stylesheet = (root / "static" / "basic.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("#registration { flex: 0 0 auto; white-space: nowrap;", stylesheet)
 
 
 if __name__ == "__main__":

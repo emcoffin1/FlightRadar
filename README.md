@@ -332,8 +332,9 @@ range for the intended nearby military-aircraft view.
 
 ## Basic display
 
-Use the curved **Basic** tab on the right of Extra (the normal radar page) to
-open `/basic`. The **Extra** tab on its left returns to the radar. A normal
+The application boots into the reversionary Basic display at `/`; `/basic`
+remains a direct alias. The **Extra** tab on its left opens the normal radar at
+`/extra`, whose curved **Basic** tab returns to the reversionary display. A normal
 tap replaces the current page rather than adding map pages to browser back
 history. The display reserves room for the tab so it cannot cover controls.
 
@@ -346,8 +347,8 @@ contact. The configured range applies to both the normal snapshot and closest
 request. Basic has no settings dialog; return to Extra to change its location
 or range.
 
-Aircraft acquisition has three explicit policies. With both retrieval toggles
-off it is local-only. **Remote fallback when local is empty** requests remote
+Aircraft acquisition has three explicit policies. **Remote fallback when local
+is empty** is enabled by default and requests remote
 data only when no fresh, in-range local position passes the Normal/Military
 filters. **Remote adsb.lol aircraft** takes precedence when enabled and retains
 continuous remote collection. Offline mode blocks both remote policies, while
@@ -379,9 +380,9 @@ the page. An independent expiry timer clears a contact when its position or
 collector heartbeat becomes stale, even if the next request hangs.
 
 This switches the browser view only. Collection, optional feeding, configured
-remote polling, and history recording continue in the backend. It does not
-change any persisted network settings. To launch the kiosk directly in Basic,
-use `http://127.0.0.1:5000/basic` as Cog's URL; no receiver changes are needed.
+remote polling, and history recording continue in the backend. The default
+kiosk URL `http://127.0.0.1:5000/` now opens Basic; no receiver changes are
+needed.
 
 ## Display performance review (October 2026)
 

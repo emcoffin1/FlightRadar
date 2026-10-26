@@ -19,9 +19,9 @@ body[data-live="true"][data-live-source="remote"] #status { color: #e89a3c; }
 body[data-image="false"] .contact { grid-template-columns: minmax(0, 1fr); }
 .identity { min-width: 0; }
 h1 { margin: 0; font-size: clamp(36px, 10vw, 150px); line-height: 1.1; letter-spacing: .025em; overflow-wrap: anywhere; font-weight: 600; }
-.identity p { display: flex; flex-wrap: wrap; gap: 12px 28px; margin: 12px 0 0; font-size: clamp(18px, 4vw, 38px); }
-#type { color: #d6a04b; }
-#registration { color: #aaa69c; }
+.identity p { display: flex; flex-wrap: nowrap; align-items: baseline; gap: 12px 28px; margin: 12px 0 0; font-size: clamp(18px, 4vw, 38px); }
+#type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d6a04b; }
+#registration { flex: 0 0 auto; white-space: nowrap; color: #aaa69c; }
 .aircraft-image { width: 100%; max-height: min(30vh, 260px); aspect-ratio: 16 / 9; object-fit: cover; border: 1px solid #514735; border-radius: 4px; background: #161510; }
 .aircraft-image[hidden] { display: none; }
 .airport-route { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: clamp(12px, 3vw, 36px); border-top: 1px solid #514735; padding-top: 12px; }

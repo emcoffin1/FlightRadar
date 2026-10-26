@@ -266,7 +266,7 @@ class SettingsMigrationTests(unittest.TestCase):
                 return connect_database(path, rows=rows)
 
             with patch.object(web_app, "connect_database", isolated_connection):
-                response = web_app.app.test_client().get("/")
+                response = web_app.app.test_client().get("/extra")
 
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
