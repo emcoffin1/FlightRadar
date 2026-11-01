@@ -554,6 +554,7 @@ body {
 
 .live-status.is-remote { color: #e89a3c; }
 .live-status.is-neutral { color: var(--muted); }
+.live-status.is-error { color: #d9665b; }
 
 .live-status::before {
     content: "";

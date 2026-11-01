@@ -7,7 +7,7 @@ from time import monotonic, sleep, time
 
 import requests
 
-from adsblol import ADSB_LOL
+from adsblol import ADSB_LOL, StaleSnapshotError
 from closest_fallback import ClosestAircraftFallback
 from database import (
     COLLECTOR_STATUS_FIELDS,
@@ -31,14 +31,17 @@ from config import (
     POSITION_RECORD_MIN_SECONDS,
     RUNTIME_DIR,
     REMOTE_RETRY_MIN_SECONDS,
+    REMOTE_RETRY_MAX_SECONDS,
     REMOTE_AUTH_RETRY_SECONDS,
     REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
+    SOURCE_SNAPSHOT_MAX_AGE_SECONDS,
     TRAIL_MAX_PLAUSIBLE_SPEED_KT,
     TRAIL_SEGMENT_GAP_SECONDS,
 )
 from local_receiver import ADSBLolFeeder, LocalReceiver
 from freshness import finite_number, is_fresh
-from retry_after import retry_after_seconds
+from retry_after import bounded_backoff, retry_after_seconds
+from source_manager import SourceManager
 
 
 LOGGER = logging.getLogger("adsb_display.collector")
@@ -126,15 +129,19 @@ class RemoteAircraftPoller:
         self.status = "disabled"
         self.error = None
         self.provider = None
+        self.http_status = None
+        self.request_count = 0
+        self.valid_snapshot_count = 0
+        self.stale_rejection_count = 0
+        self.consecutive_failures = 0
         self.lock = Lock()
 
     @staticmethod
     def select_provider(preference, local_enabled, upload_enabled):
         if preference == "feeder":
             return "feeder"
-        if preference == "public":
-            return "public"
-        return "feeder" if local_enabled and upload_enabled else "public"
+        # Upload connectivity does not prove feeder re-api authorization.
+        return "public"
 
     def configure(self, *, enabled, provider, latitude, longitude, radius):
         next_config = (
@@ -150,6 +157,7 @@ class RemoteAircraftPoller:
             self.snapshot_generated_at = None
             self.next_due = 0
             self.error = None
+            self.http_status = None
             self.provider = provider if enabled else None
             self.status = "idle" if enabled else "disabled"
             if self.future is not None:
@@ -173,47 +181,90 @@ class RemoteAircraftPoller:
             generation, data = future.result()
             if generation != self.generation:
                 return
-            self.snapshot = data
+            generated_at = getattr(data, "generated_at", None)
+            if generated_at is None:
+                generated_at = max(
+                    (item.get("snapshot_generated_at") or 0 for item in data),
+                    default=0,
+                ) or None
+            if generated_at is None:
+                raise ValueError("remote snapshot has no source timestamp")
+            if now_wall - float(generated_at) > REMOTE_SNAPSHOT_MAX_AGE_SECONDS:
+                raise StaleSnapshotError("remote snapshot source timestamp is stale")
+            self.snapshot = list(data)
             self.last_success_at = now_wall
-            self.snapshot_generated_at = max(
-                (item.get("snapshot_generated_at") or 0 for item in data),
-                default=now_wall,
-            )
+            self.snapshot_generated_at = float(generated_at)
             self.next_due = now_monotonic + ADSB_LOL_POLL_SECONDS
-            self.status = "authorized" if self.provider == "feeder" else "ready"
+            self.status = "ready" if self.snapshot else "empty"
             self.error = None
+            self.http_status = 200
+            self.valid_snapshot_count += 1
+            self.consecutive_failures = 0
         except CancelledError:
             return
+        except StaleSnapshotError as error:
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.stale_rejection_count += 1
+            self.consecutive_failures += 1
+            self.next_due = now_monotonic + delay
+            self.status = "stale"
+            self.error = str(error)
+            self.http_status = 200
         except requests.exceptions.HTTPError as error:
             response = getattr(error, "response", None)
             status_code = response.status_code if response is not None else None
+            transient_delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
             if status_code in {401, 403}:
-                delay = REMOTE_AUTH_RETRY_SECONDS
+                delay = max(REMOTE_AUTH_RETRY_SECONDS, transient_delay)
                 self.status = "unauthorized"
             elif status_code == 429:
                 delay = max(
-                    REMOTE_RETRY_MIN_SECONDS,
+                    transient_delay,
                     retry_after_seconds(error, now=now_wall) or 0,
                 )
                 self.status = "rate_limited"
             else:
-                delay = REMOTE_RETRY_MIN_SECONDS
+                delay = transient_delay
                 self.status = "error"
             self.next_due = now_monotonic + delay
             self.error = str(error)
+            self.http_status = status_code
+            self.consecutive_failures += 1
             LOGGER.warning(
                 "Remote %s poll failed; retrying in %s seconds: %s",
                 self.provider, delay, error,
             )
         except (requests.exceptions.RequestException, ValueError) as error:
-            self.next_due = now_monotonic + REMOTE_RETRY_MIN_SECONDS
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.next_due = now_monotonic + delay
             self.status = "error"
             self.error = str(error)
+            self.http_status = None
+            self.consecutive_failures += 1
             LOGGER.warning("Remote %s poll failed: %s", self.provider, error)
         except Exception as error:
-            self.next_due = now_monotonic + REMOTE_RETRY_MIN_SECONDS
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.next_due = now_monotonic + delay
             self.status = "error"
             self.error = str(error)
+            self.http_status = None
+            self.consecutive_failures += 1
             LOGGER.exception("Unexpected remote %s poll failure", self.provider)
 
     def tick(self):
@@ -227,6 +278,7 @@ class RemoteAircraftPoller:
             if enabled and self.future is None and now_monotonic >= self.next_due:
                 generation = self.generation
                 self.status = "requesting"
+                self.request_count += 1
                 self.future = self.executor.submit(
                     self._fetch,
                     generation,
@@ -241,7 +293,17 @@ class RemoteAircraftPoller:
                 or now_wall - self.last_success_at > REMOTE_SNAPSHOT_MAX_AGE_SECONDS
             ):
                 return []
-            return [dict(item) for item in self.snapshot]
+            fresh = [
+                dict(item) for item in self.snapshot
+                if is_fresh(
+                    item.get("position_observed_at"),
+                    POSITION_FRESH_SECONDS,
+                    now=now_wall,
+                )
+            ]
+            if self.snapshot and not fresh and self.future is None:
+                self.status = "stale"
+            return fresh
 
     def diagnostics(self):
         with self.lock:
@@ -253,15 +315,20 @@ class RemoteAircraftPoller:
                 "last_success_at": self.last_success_at,
                 "snapshot_generated_at": self.snapshot_generated_at,
                 "snapshot_age_seconds": (
-                    None if self.last_success_at is None
-                    else max(0, now_wall - self.last_success_at)
+                    None if self.snapshot_generated_at is None
+                    else max(0, now_wall - self.snapshot_generated_at)
                 ),
                 "next_retry_at": (
                     None if self.next_due <= now_monotonic
                     else now_wall + self.next_due - now_monotonic
                 ),
                 "error": self.error,
+                "http_status": self.http_status,
                 "in_flight": self.future is not None,
+                "request_count": self.request_count,
+                "valid_snapshot_count": self.valid_snapshot_count,
+                "stale_rejection_count": self.stale_rejection_count,
+                "consecutive_failures": self.consecutive_failures,
             }
 
     def shutdown(self):
@@ -844,6 +911,7 @@ def run_collector(
     local_aircraft = []
     local_failures = 0
     iterations = 0
+    source_manager = SourceManager()
 
     while stop_event is None or not stop_event.is_set():
         collection_settings = db.get_collection_settings()
@@ -893,6 +961,7 @@ def run_collector(
                     max_range=MAX_COLLECTION_RANGE,
                     source="local",
                     fetched_at=local_payload["source_fetched_at"],
+                    snapshot_max_age=SOURCE_SNAPSHOT_MAX_AGE_SECONDS,
                 )
                 local_failures = 0
                 local_snapshot_succeeded = True
@@ -943,6 +1012,14 @@ def run_collector(
                 now=wall_clock(),
             )
         ]
+        source_decision = source_manager.decide(
+            local_enabled=local_enabled,
+            local_snapshot_valid=local_snapshot_succeeded,
+            eligible_local_count=len(eligible_local),
+            fallback_enabled=fallback_enabled,
+            continuous_remote=continuous_remote,
+            offline=offline_mode_enabled,
+        )
         fallback_poller.configure(
             enabled=fallback_enabled,
             provider=provider,
@@ -967,10 +1044,14 @@ def run_collector(
         remote_aircraft = remote_snapshot if continuous_remote else []
         remote_busy = remote_poller.diagnostics()["in_flight"]
         fallback_aircraft = fallback_poller.tick(
-            active=not eligible_local and not remote_busy
+            active=source_decision["poll_fallback"] and not remote_busy
         )
         if fallback_enabled:
-            remote_aircraft = fallback_aircraft
+            remote_aircraft = (
+                fallback_aircraft
+                if source_decision["display_remote"]
+                else []
+            )
 
         data = filter_modes(
             merge_aircraft(remote_aircraft, local_aircraft),
@@ -994,6 +1075,14 @@ def run_collector(
         now_wall = wall_clock()
         remote_diagnostics = remote_poller.diagnostics()
         fallback_diagnostics = fallback_poller.diagnostics()
+        active_remote_diagnostics = (
+            remote_diagnostics if continuous_remote else fallback_diagnostics
+        )
+        source_manager.observe_remote(
+            active_remote_diagnostics["status"],
+            bool(remote_aircraft),
+        )
+        source_diagnostics = source_manager.diagnostics()
         status_values = dict(
             heartbeat_at=now_wall,
             local_snapshot_generated_at=local_snapshot_generated_at,
@@ -1005,6 +1094,17 @@ def run_collector(
             remote_next_retry_at=remote_diagnostics["next_retry_at"],
             remote_status=remote_diagnostics["status"],
             remote_error=remote_diagnostics["error"],
+            remote_http_status=remote_diagnostics["http_status"],
+            remote_request_count=remote_diagnostics["request_count"],
+            remote_valid_snapshot_count=remote_diagnostics[
+                "valid_snapshot_count"
+            ],
+            remote_stale_rejection_count=remote_diagnostics[
+                "stale_rejection_count"
+            ],
+            remote_consecutive_failures=remote_diagnostics[
+                "consecutive_failures"
+            ],
             acquisition_policy=acquisition_policy,
             eligible_local_position_count=len(eligible_local),
             fallback_provider=fallback_diagnostics["provider"],
@@ -1016,6 +1116,15 @@ def run_collector(
             fallback_http_status=fallback_diagnostics["http_status"],
             fallback_error=fallback_diagnostics["error"],
             fallback_request_count=fallback_diagnostics["request_count"],
+            fallback_valid_snapshot_count=fallback_diagnostics[
+                "valid_snapshot_count"
+            ],
+            fallback_stale_rejection_count=fallback_diagnostics[
+                "stale_rejection_count"
+            ],
+            fallback_consecutive_failures=fallback_diagnostics[
+                "consecutive_failures"
+            ],
             local_message_fresh_count=sum(
                 is_fresh(item.get("message_observed_at"), MESSAGE_FRESH_SECONDS, now=now_wall)
                 for item in local_aircraft
@@ -1039,6 +1148,11 @@ def run_collector(
             upload_relay_running=int(
                 feeder.process is not None and feeder.process.poll() is None
             ),
+            source_manager_state=source_diagnostics["state"],
+            local_snapshot_valid=int(local_snapshot_succeeded),
+            local_empty_streak=source_diagnostics["empty_streak"],
+            local_failure_streak=source_diagnostics["failure_streak"],
+            local_recovery_streak=source_diagnostics["recovery_streak"],
         )
         if hasattr(db, "update_collector_status"):
             db.update_collector_status(**status_values)

@@ -77,7 +77,7 @@
         set("destination", missing(destination) ? null : destination);
         set("destination-name", missing(destinationName) ? null : destinationName);
     }
-    function clear(status) {
+    function clear(status, health = "neutral") {
         window.clearTimeout(expiryTimer);
         expiryTimer = null;
         for (const id of ["callsign", "type", "registration", "distance", "altitude", "speed", "track", "hex"]) set(id, null);
@@ -88,6 +88,7 @@
         clearImage();
         document.body.dataset.live = "false";
         document.body.dataset.liveSource = "none";
+        document.body.dataset.health = health;
     }
     function render(payload) {
         window.clearTimeout(expiryTimer);
@@ -102,11 +103,13 @@
             config.heartbeatFreshMs - heartbeatAge
         );
         if (!payload.collector_fresh || !Number.isFinite(heartbeatAge) || heartbeatAge < -config.clockSkewMs) {
-            clear("Receiver stale");
+            clear("Receiver stale", "error");
             return;
         }
         if (!aircraft || !Number.isFinite(remaining) || remaining <= 0 || age < -config.clockSkewMs) {
-            clear(payload.status_message || "No fresh aircraft");
+            const unavailable = ["stale", "error", "backoff", "unavailable"]
+                .includes(payload.display_state);
+            clear(payload.status_message || "No fresh aircraft", unavailable ? "error" : "neutral");
             return;
         }
         set("callsign", aircraft.callsign || aircraft.r || aircraft.hex);
@@ -123,6 +126,7 @@
         set("status", "Live");
         document.body.dataset.live = "true";
         document.body.dataset.liveSource = remote ? "remote" : "local";
+        document.body.dataset.health = "ready";
         expiryTimer = window.setTimeout(() => clear("Data stale"), remaining);
     }
     async function poll() {
@@ -145,7 +149,7 @@
                 render(payload);
             }
         } catch (error) {
-            if (active && token === generation && !document.hidden) clear("Connection lost");
+            if (active && token === generation && !document.hidden) clear("Connection lost", "error");
         } finally {
             window.clearTimeout(timeout);
             if (controller === requestController) controller = null;

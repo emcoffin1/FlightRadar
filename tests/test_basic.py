@@ -144,6 +144,34 @@ class BasicDisplayTests(unittest.TestCase):
         self.assertEqual(acquisition["selected"]["position_source"], "remote_fallback_public")
         self.assertEqual(acquisition["fallback"]["request_count"], 3)
 
+    def test_live_endpoints_disable_browser_caching(self):
+        for path in ["/api/aircraft", "/api/aircraft/nearest", "/api/diagnostics"]:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self.client.get(path).headers.get("Cache-Control"),
+                    "no-store",
+                )
+
+    def test_health_distinguishes_process_liveness_from_collector_readiness(self):
+        self.assertEqual(self.client.get("/api/health/live").status_code, 200)
+        self.assertEqual(self.client.get("/api/health/ready").status_code, 200)
+        with connect_database(self.path) as conn:
+            conn.execute(
+                "UPDATE collector_status SET heartbeat_at = ? WHERE id = 1",
+                (self.now - 100,),
+            )
+        response = self.client.get("/api/health/ready")
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.get_json()["ready"])
+
+    def test_collector_failure_requests_supervisor_restart(self):
+        with (
+            patch.object(web_app, "run_collector", side_effect=RuntimeError("boom")),
+            patch.object(web_app.os, "_exit") as exit_process,
+        ):
+            web_app._run_supervised_collector()
+        exit_process.assert_called_once_with(1)
+
     def test_basic_document_loads_only_lightweight_scripts(self):
         page = self.client.get("/basic").get_data(as_text=True)
         self.assertIn("basic.js", page)

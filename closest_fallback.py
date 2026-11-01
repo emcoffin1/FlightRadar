@@ -8,14 +8,16 @@ from time import monotonic, time
 
 import requests
 
+from adsblol import StaleSnapshotError
 from config import (
     ADSB_LOL_CLOSEST_POLL_SECONDS,
     POSITION_FRESH_SECONDS,
     REMOTE_AUTH_RETRY_SECONDS,
     REMOTE_RETRY_MIN_SECONDS,
+    REMOTE_RETRY_MAX_SECONDS,
 )
 from freshness import is_fresh
-from retry_after import retry_after_seconds
+from retry_after import bounded_backoff, retry_after_seconds
 
 
 LOGGER = logging.getLogger("adsb_display.closest_fallback")
@@ -50,6 +52,9 @@ class ClosestAircraftFallback:
         self.last_attempt_at = None
         self.last_success_at = None
         self.request_count = 0
+        self.valid_snapshot_count = 0
+        self.stale_rejection_count = 0
+        self.consecutive_failures = 0
         self.closed = False
         atexit.register(self.shutdown)
 
@@ -131,8 +136,10 @@ class ClosestAircraftFallback:
             if generation != self.generation or not self.active:
                 return
             self.last_success_at = now_wall
-            if aircraft:
-                self.snapshot = aircraft
+            self.valid_snapshot_count += 1
+            self.consecutive_failures = 0
+            # A valid fresh empty response must clear an older provider cache.
+            self.snapshot = aircraft
             cached_fresh = any(
                 is_fresh(
                     item.get("position_observed_at"),
@@ -146,36 +153,66 @@ class ClosestAircraftFallback:
             self.http_status = 200
         except CancelledError:
             return
+        except StaleSnapshotError as error:
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.next_due = now_monotonic + delay
+            self.status = "stale"
+            self.error = str(error)
+            self.http_status = 200
+            self.stale_rejection_count += 1
+            self.consecutive_failures += 1
         except requests.exceptions.HTTPError as error:
             response = getattr(error, "response", None)
             status_code = response.status_code if response is not None else None
             self.http_status = status_code
+            transient_delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
             if status_code in {401, 403}:
-                delay = REMOTE_AUTH_RETRY_SECONDS
+                delay = max(REMOTE_AUTH_RETRY_SECONDS, transient_delay)
                 self.status = "unauthorized"
             elif status_code == 429:
                 delay = max(
-                    REMOTE_RETRY_MIN_SECONDS,
+                    transient_delay,
                     retry_after_seconds(error, now=now_wall) or 0,
                 )
                 self.status = "rate_limited"
             else:
-                delay = REMOTE_RETRY_MIN_SECONDS
+                delay = transient_delay
                 self.status = "error"
             self.next_due = now_monotonic + delay
             self.error = str(error)
+            self.consecutive_failures += 1
             LOGGER.warning("Fallback aircraft request failed: %s", error)
         except (requests.exceptions.RequestException, ValueError) as error:
-            self.next_due = now_monotonic + REMOTE_RETRY_MIN_SECONDS
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.next_due = now_monotonic + delay
             self.status = "error"
             self.error = str(error)
             self.http_status = None
+            self.consecutive_failures += 1
             LOGGER.warning("Fallback aircraft request failed: %s", error)
         except Exception as error:
-            self.next_due = now_monotonic + REMOTE_RETRY_MIN_SECONDS
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.next_due = now_monotonic + delay
             self.status = "error"
             self.error = str(error)
             self.http_status = None
+            self.consecutive_failures += 1
             LOGGER.exception("Unexpected fallback aircraft failure")
 
     def tick(self, *, active):
@@ -239,6 +276,9 @@ class ClosestAircraftFallback:
                 "http_status": self.http_status,
                 "error": self.error,
                 "request_count": self.request_count,
+                "valid_snapshot_count": self.valid_snapshot_count,
+                "stale_rejection_count": self.stale_rejection_count,
+                "consecutive_failures": self.consecutive_failures,
             }
 
     def shutdown(self):

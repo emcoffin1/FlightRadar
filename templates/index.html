@@ -387,14 +387,15 @@
                             id="remote-endpoint-preference"
                             name="remote_endpoint_preference"
                         >
-                            <option value="auto">Auto (feeder when uploading)</option>
+                            <option value="auto">Auto (public API)</option>
                             <option value="feeder">Feeder re-api</option>
                             <option value="public">Public point API</option>
                         </select>
                         <p class="receiver-help">
-                            Feeder re-api authorization follows the backend's
-                            public IP. Auto uses feeder re-api while this app
-                            is uploading; otherwise it uses the public API.
+                            Auto uses the public endpoint. Feeder re-api is an
+                            explicit option because upload connectivity does
+                            not authorize it; access follows the backend's
+                            approved public IP and may return 401/403.
                         </p>
                     </div>
 

@@ -96,10 +96,21 @@ frontend_diagnostics_state = {
     "trail_point_count": 0,
 }
 external_request_counts = Counter()
+APP_VERSION = os.environ.get("FLIGHTRADAR_VERSION", "unknown")
 TRANSPARENT_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
     "0000000d49444154789c6360000000020001e221bc330000000049454e44ae426082"
 )
+
+
+def _run_supervised_collector():
+    try:
+        run_collector(adsb_client, stop_event=collector_stop_event)
+    except Exception:
+        LOGGER.exception(
+            "Aircraft collector stopped unexpectedly; terminating for supervisor restart"
+        )
+        os._exit(1)
 
 
 def start_aircraft_collector():
@@ -110,9 +121,7 @@ def start_aircraft_collector():
 
     collector_stop_event.clear()
     collector_thread = Thread(
-        target=run_collector,
-        args=(adsb_client,),
-        kwargs={"stop_event": collector_stop_event},
+        target=_run_supervised_collector,
         name="aircraft-collector",
         daemon=True,
     )
@@ -958,7 +967,9 @@ def get_all_aircraft():
         """, (display_range, now - POSITION_FRESH_SECONDS)).fetchall()
 
         status = conn.execute("""
-            SELECT heartbeat_at, fallback_status FROM collector_status WHERE id = 1
+            SELECT heartbeat_at, fallback_status, source_manager_state,
+                acquisition_policy, remote_provider, fallback_provider
+            FROM collector_status WHERE id = 1
         """).fetchone()
 
     collector_fresh = bool(
@@ -975,6 +986,14 @@ def get_all_aircraft():
     response.headers["X-Response-Generated-At"] = str(now)
     fallback_status = status["fallback_status"] if status else "disabled"
     response.headers["X-Acquisition-State"] = fallback_status
+    response.headers["X-Source-State"] = (
+        status["source_manager_state"] if status else "LOCAL_UNHEALTHY"
+    )
+    response.headers["X-Acquisition-Provider"] = (
+        (status["remote_provider"] if status["acquisition_policy"] == "continuous_remote"
+         else status["fallback_provider"]) if status else ""
+    ) or ""
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -1034,12 +1053,15 @@ def get_nearest_aircraft():
             aircraft["aircraft_image"] = aircraft_image_url("R44")
 
     fallback_status = status["fallback_status"] if status else "disabled"
+    source_state = (
+        status["source_manager_state"] if status else "LOCAL_UNHEALTHY"
+    )
     if aircraft is not None:
         display_state = live_source
         status_message = "Live"
     elif not fresh:
         display_state = "stale"
-        status_message = "Receiver stale"
+        status_message = "Collector unavailable"
     elif fallback_status == "requesting":
         display_state = "requesting"
         status_message = "Requesting fallback"
@@ -1047,12 +1069,22 @@ def get_nearest_aircraft():
         display_state = "backoff" if fallback_status == "rate_limited" else "error"
         status_message = {
             "rate_limited": "Fallback rate limited",
-            "unauthorized": "Fallback unauthorized",
+            "unauthorized": (
+                "Feeder API unauthorized; select Public endpoint"
+                if status and status["fallback_provider"] == "feeder"
+                else "Fallback unauthorized"
+            ),
             "error": "Fallback unavailable",
         }[fallback_status]
     elif fallback_status == "stale":
         display_state = "stale"
         status_message = "Fallback data stale"
+    elif source_state == "LOCAL_UNHEALTHY":
+        display_state = "unavailable"
+        status_message = "Receiver unavailable"
+    elif source_state == "REMOTE_UNAVAILABLE":
+        display_state = "unavailable"
+        status_message = "Remote data unavailable"
     else:
         display_state = "empty"
         status_message = "No fresh aircraft"
@@ -1066,6 +1098,7 @@ def get_nearest_aircraft():
         "display_state": display_state,
         "status_message": status_message,
         "fallback_status": fallback_status,
+        "source_state": source_state,
     })
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -1442,7 +1475,14 @@ def diagnostics():
             0,
             now - float(selected_data["position_observed_at"]),
         )
-    return jsonify({
+    payload = {
+        "version": APP_VERSION,
+        "health": {
+            "collector_alive": collector_data["running"],
+            "database_ok": True,
+            "ready": collector_data["running"],
+            "source_state": collector_data.get("source_manager_state"),
+        },
         "database": dict(counts),
         "freshness": dict(freshness),
         "trail": dict(trail),
@@ -1467,6 +1507,33 @@ def diagnostics():
                 "http_status": collector_data.get("fallback_http_status"),
                 "error": collector_data.get("fallback_error"),
                 "request_count": collector_data.get("fallback_request_count", 0),
+                "valid_snapshot_count": collector_data.get(
+                    "fallback_valid_snapshot_count", 0
+                ),
+                "stale_rejection_count": collector_data.get(
+                    "fallback_stale_rejection_count", 0
+                ),
+                "consecutive_failures": collector_data.get(
+                    "fallback_consecutive_failures", 0
+                ),
+            },
+            "remote": {
+                "status": collector_data.get("remote_status"),
+                "provider": collector_data.get("remote_provider"),
+                "http_status": collector_data.get("remote_http_status"),
+                "error": collector_data.get("remote_error"),
+                "last_success_at": collector_data.get("remote_last_success_at"),
+                "next_retry_at": collector_data.get("remote_next_retry_at"),
+                "request_count": collector_data.get("remote_request_count", 0),
+                "valid_snapshot_count": collector_data.get(
+                    "remote_valid_snapshot_count", 0
+                ),
+                "stale_rejection_count": collector_data.get(
+                    "remote_stale_rejection_count", 0
+                ),
+                "consecutive_failures": collector_data.get(
+                    "remote_consecutive_failures", 0
+                ),
             },
         },
         "frontend": frontend_data,
@@ -1475,7 +1542,47 @@ def diagnostics():
             **dict(external_request_counts),
         },
         "route_lookup": route_coordinator.diagnostics(),
+    }
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/health/live")
+def health_live():
+    response = jsonify({"live": True, "version": APP_VERSION})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/health/ready")
+def health_ready():
+    now = time.time()
+    try:
+        with connect_database(rows=True) as conn:
+            row = conn.execute(
+                "SELECT heartbeat_at FROM collector_status WHERE id = 1"
+            ).fetchone()
+        heartbeat = row["heartbeat_at"] if row else None
+        ready = bool(
+            heartbeat is not None
+            and -CLOCK_SKEW_TOLERANCE_SECONDS <= now - float(heartbeat)
+            <= COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
+        )
+        detail = "ready" if ready else "collector heartbeat stale"
+    except Exception as error:
+        ready = False
+        heartbeat = None
+        detail = f"database unavailable: {type(error).__name__}"
+    response = jsonify({
+        "ready": ready,
+        "detail": detail,
+        "heartbeat_at": heartbeat,
+        "version": APP_VERSION,
     })
+    response.status_code = 200 if ready else 503
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/api/diagnostics/frontend", methods=["POST"])

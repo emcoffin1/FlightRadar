@@ -189,9 +189,6 @@ class ADSBLolFeeder:
             return
 
         station_uuid = self._station_uuid()
-        self.log_handle = (self.state_dir / "adsblol-feeder.log").open(
-            "a", encoding="utf-8"
-        )
         command = [
             binary,
             "--net-only",
@@ -208,13 +205,13 @@ class ADSBLolFeeder:
         try:
             self.process = subprocess.Popen(
                 command,
-                stdout=self.log_handle,
+                # readsb runs with --quiet. Discard residual child output so a
+                # long-lived unattended relay cannot grow an unbounded file.
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.STDOUT,
             )
         except OSError as error:
             LOGGER.error("Could not start adsb.lol feed relay: %s", error)
-            self.log_handle.close()
-            self.log_handle = None
             return
         self.source = source
         LOGGER.info(

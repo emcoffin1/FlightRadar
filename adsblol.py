@@ -11,6 +11,7 @@ from config import (
     DEFAULT_SEARCH_RANGE,
     MESSAGE_FRESH_SECONDS,
     POSITION_FRESH_SECONDS,
+    REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
     REMOTE_REQUEST_TIMEOUT_SECONDS,
 )
 from freshness import (
@@ -92,6 +93,20 @@ class ExternalLookupDisabled(Exception):
     """Raised when route-network permission is revoked between providers."""
 
 
+class StaleSnapshotError(ValueError):
+    """Raised when a provider returns a valid schema with obsolete data."""
+
+
+class AircraftSnapshot(list):
+    """Normalized aircraft plus the source timestamp for empty snapshots."""
+
+    def __init__(self, aircraft, *, generated_at, fetched_at, source):
+        super().__init__(aircraft)
+        self.generated_at = generated_at
+        self.fetched_at = fetched_at
+        self.source = source
+
+
 def decode_flags(db_flags: int) -> list:
     try:
         db_flags = int(db_flags)
@@ -157,6 +172,7 @@ class ADSB_LOL:
         *,
         reference_lat=None,
         reference_lon=None,
+        snapshot_max_age=None,
     ):
         """Add receiver-relative distance to a normalized aircraft list."""
         if not isinstance(data, dict):
@@ -233,6 +249,7 @@ class ADSB_LOL:
         fetched_at=None,
         reference_lat=None,
         reference_lon=None,
+        snapshot_max_age=None,
     ):
         """Validate and normalize readsb-compatible aircraft snapshots."""
         if not isinstance(data, dict):
@@ -247,6 +264,13 @@ class ADSB_LOL:
         )
         if generated_at is None:
             raise ValueError("aircraft snapshot has an invalid timestamp")
+        if (
+            snapshot_max_age is not None
+            and fetched_at - generated_at > float(snapshot_max_age)
+        ):
+            raise StaleSnapshotError(
+                f"aircraft snapshot is {fetched_at - generated_at:.1f}s old"
+            )
 
         raw_aircraft = data.get("ac")
         if not isinstance(raw_aircraft, list):
@@ -402,7 +426,12 @@ class ADSB_LOL:
 
             new_data.append(plane)
                 
-        return new_data
+        return AircraftSnapshot(
+            new_data,
+            generated_at=generated_at,
+            fetched_at=fetched_at,
+            source=source,
+        )
 
 
     def GET_flight_info(self, callsign, hex, permission_check=None):
@@ -546,6 +575,7 @@ class ADSB_LOL:
             fetched_at=fetched_at,
             reference_lat=latitude,
             reference_lon=longitude,
+            snapshot_max_age=REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
         )
         
         return data
@@ -586,4 +616,5 @@ class ADSB_LOL:
             fetched_at=fetched_at,
             reference_lat=latitude,
             reference_lon=longitude,
+            snapshot_max_age=REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
         )

@@ -46,12 +46,25 @@ COLLECTOR_STATUS_COLUMN_DEFINITIONS = {
     "fallback_http_status": "INTEGER",
     "fallback_error": "TEXT",
     "fallback_request_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_valid_snapshot_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_stale_rejection_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
     "local_message_fresh_count": "INTEGER NOT NULL DEFAULT 0",
     "local_position_fresh_count": "INTEGER NOT NULL DEFAULT 0",
     "remote_message_fresh_count": "INTEGER NOT NULL DEFAULT 0",
     "remote_position_fresh_count": "INTEGER NOT NULL DEFAULT 0",
     "rejected_stale_positions": "INTEGER NOT NULL DEFAULT 0",
     "upload_relay_running": "INTEGER NOT NULL DEFAULT 0",
+    "source_manager_state": "TEXT NOT NULL DEFAULT 'LOCAL_UNHEALTHY'",
+    "local_snapshot_valid": "INTEGER NOT NULL DEFAULT 0",
+    "local_empty_streak": "INTEGER NOT NULL DEFAULT 0",
+    "local_failure_streak": "INTEGER NOT NULL DEFAULT 0",
+    "local_recovery_streak": "INTEGER NOT NULL DEFAULT 0",
+    "remote_http_status": "INTEGER",
+    "remote_request_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_valid_snapshot_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_stale_rejection_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
 }
 COLLECTOR_STATUS_FIELDS = frozenset(COLLECTOR_STATUS_COLUMN_DEFINITIONS)
 
@@ -67,7 +80,10 @@ def decode_database_flags(value):
 
 @contextmanager
 def connect_database(db_path=DATABASE_PATH, *, rows=False):
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(db_path, timeout=5)
+    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
     connection.execute("PRAGMA foreign_keys = ON")
     if rows:
         connection.row_factory = sqlite3.Row
@@ -383,7 +399,7 @@ def ensure_mode_settings(conn):
             adsblol_feed_enabled INTEGER NOT NULL DEFAULT 0,
             adsblol_upload_enabled INTEGER NOT NULL DEFAULT 0,
             remote_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
-            fallback_aircraft_enabled INTEGER NOT NULL DEFAULT 1,
+            fallback_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
             route_enrichment_enabled INTEGER NOT NULL DEFAULT 0,
             external_tiles_enabled INTEGER NOT NULL DEFAULT 0,
             offline_mode_enabled INTEGER NOT NULL DEFAULT 0,
@@ -506,17 +522,15 @@ def ensure_mode_settings(conn):
         WHERE local_default_applied = 0
     """)
 
-    # Enable loss-of-local fallback once for existing installations. The
-    # marker ensures a later user choice to disable it remains respected.
+    # Preserve an existing choice. New installations and legacy databases do
+    # not silently gain external fallback traffic.
     if "fallback_default_applied" not in columns:
         conn.execute(
             "ALTER TABLE app_settings "
             "ADD COLUMN fallback_default_applied INTEGER NOT NULL DEFAULT 0"
         )
     conn.execute("""
-        UPDATE app_settings
-        SET fallback_aircraft_enabled = 1,
-            fallback_default_applied = 1
+        UPDATE app_settings SET fallback_default_applied = 1
         WHERE fallback_default_applied = 0
     """)
 

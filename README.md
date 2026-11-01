@@ -25,8 +25,10 @@ The receiver address accepts any of these forms:
   `http://<address>/readsb/aircraft.json`.
 
 Local receiver JSON is enabled by default and polled every 1 second. Public
-adsb.lol retrieval uses `ADSB_LOL_POLL_SECONDS` in `config.py` (currently 10
-seconds). The local and public snapshots are merged by ICAO hex; fresh local
+adsb.lol fallback retrieval uses `ADSB_LOL_CLOSEST_POLL_SECONDS` in `config.py`
+(currently 15 seconds). Continuous remote retrieval, when explicitly enabled,
+uses `ADSB_LOL_POLL_SECONDS` (currently 30 seconds). The local and public
+snapshots are merged by ICAO hex; fresh local
 metadata is preferred when present, while the freshest valid position wins.
 
 Remote requests run in one bounded background worker. A DNS failure, timeout,
@@ -45,8 +47,9 @@ The coordinate dialog persists these independent settings in `aircraft.db`:
 - **Remote fallback when local is empty** enables the 15-second fallback
   policy without enabling continuous remote collection.
 - **Remote endpoint** selects `auto`, the public point API, or feeder-only
-  re-api. `auto` prefers re-api only when local reception and this app's upload
-  relay are both enabled. Selecting `feeder` supports a feed managed elsewhere.
+  re-api. `auto` uses the public API. Uploading does not prove feeder re-api
+  authorization; select `feeder` only when adsb.lol has approved the backend's
+  public IP.
 - **External route lookup** permits background ADSBDB/HexDB lookups.
 - **Download map tiles** permits OpenStreetMap cache misses and revalidation.
 - **Offline mode** overrides every external option without disabling local data.
@@ -212,8 +215,15 @@ Uploading and remote retrieval have separate switches in the Coords dialog.
 When upload and the local receiver are enabled, the app starts a
 `readsb --net-only` relay from the configured Beast host/port to adsb.lol. A
 stable station UUID is stored in
-`.runtime/adsblol_station_uuid`, and relay output is appended to
-`.runtime/adsblol-feeder.log`.
+`.runtime/adsblol_station_uuid`. The quiet relay's residual stdout/stderr is
+discarded; lifecycle failures are reported through the application journal,
+preventing an unattended child-process log from growing indefinitely.
+
+An `unauthorized` fallback state means the selected endpoint returned HTTP 401
+or 403. Check `/api/diagnostics` for the provider and status. If the provider
+is `feeder`, choose **Auto** or **Public point API** unless adsb.lol has approved
+the Pi's current outbound public IP. A working upload relay is not evidence of
+re-api authorization.
 
 The Flask backend itself must have `readsb` installed even when the USB receiver
 is attached to a different computer. Disabling upload, the local receiver, or

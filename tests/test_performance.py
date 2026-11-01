@@ -166,7 +166,7 @@ class NetworkSettingsTests(unittest.TestCase):
 
         self.assertTrue(row["adsblol_upload_enabled"])
         self.assertTrue(row["remote_aircraft_enabled"])
-        self.assertTrue(row["fallback_aircraft_enabled"])
+        self.assertFalse(row["fallback_aircraft_enabled"])
         self.assertFalse(row["route_enrichment_enabled"])
         self.assertFalse(row["external_tiles_enabled"])
 
@@ -179,7 +179,7 @@ class NetworkSettingsTests(unittest.TestCase):
                     "SELECT fallback_aircraft_enabled "
                     "FROM app_settings WHERE id = 1"
                 ).fetchone()
-                self.assertTrue(first["fallback_aircraft_enabled"])
+                self.assertFalse(first["fallback_aircraft_enabled"])
 
                 conn.execute("""
                     UPDATE app_settings
@@ -868,7 +868,7 @@ class CollectorAndHistoryTests(unittest.TestCase):
         ):
             collector.run_collector(
                 adsb,
-                max_iterations=2,
+                max_iterations=4,
                 monotonic_clock=lambda: 100,
                 wall_clock=lambda: now,
                 sleeper=yield_to_worker,

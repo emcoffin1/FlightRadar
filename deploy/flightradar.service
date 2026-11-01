@@ -1,0 +1,23 @@
+[Unit]
+Description=FlightRadar ADS-B web application and collector
+Wants=network-online.target readsb.service
+After=network-online.target readsb.service
+
+[Service]
+Type=simple
+User=flightradar
+Group=flightradar
+WorkingDirectory=/opt/FlightRadar
+EnvironmentFile=-/etc/default/flightradar
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/FlightRadar/.venv/bin/python /opt/FlightRadar/app.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flightradar
+
+[Install]
+WantedBy=multi-user.target

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 import requests
 
 import app as web_app
-from adsblol import ADSB_LOL
+from adsblol import ADSB_LOL, StaleSnapshotError
 from config import POSITION_FRESH_SECONDS, REMOTE_RETRY_MIN_SECONDS
 from database import (
     COLLECTOR_STATUS_FIELDS,
@@ -409,10 +409,33 @@ class RemoteProviderTests(unittest.TestCase):
         with patch("adsblol.time.time", return_value=now):
             self.assertEqual(client.GET_point(50, provider="public"), [])
 
+    def test_http_200_with_old_snapshot_timestamp_is_rejected(self):
+        now = 1_800_000_000
+        client = ADSB_LOL(lat=33.5, lon=-117.1)
+        client._external_get = Mock(return_value=self.response({
+            "now": (now - 31) * 1000,
+            "ac": [],
+        }))
+        with patch("adsblol.time.time", return_value=now):
+            with self.assertRaises(StaleSnapshotError):
+                client.GET_point(50, provider="public")
+
+    def test_fresh_empty_snapshot_retains_provider_timestamp(self):
+        now = 1_800_000_000
+        client = ADSB_LOL(lat=33.5, lon=-117.1)
+        client._external_get = Mock(return_value=self.response({
+            "now": now * 1000,
+            "ac": [],
+        }))
+        with patch("adsblol.time.time", return_value=now):
+            snapshot = client.GET_point(50, provider="public")
+        self.assertEqual(snapshot, [])
+        self.assertEqual(snapshot.generated_at, now)
+
     def test_endpoint_selection_never_implicitly_enables_remote(self):
         self.assertEqual(
             RemoteAircraftPoller.select_provider("auto", True, True),
-            "feeder",
+            "public",
         )
         self.assertEqual(
             RemoteAircraftPoller.select_provider("auto", True, False),
@@ -523,6 +546,10 @@ class RemoteProviderTests(unittest.TestCase):
             wait_for(lambda: poller.future.done())
             self.assertEqual(len(poller.tick()), 1)
 
+            # Force the failure while the first position is still live; the
+            # production success cadence is tested independently.
+            with poller.lock:
+                poller.next_due = clock[0] + 10
             clock[0] += 10
             wall[0] += 10
             poller.tick()

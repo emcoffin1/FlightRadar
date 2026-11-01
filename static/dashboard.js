@@ -861,13 +861,18 @@ function clearPrimaryAircraft() {
     displayLiveStatus(null);
 }
 
-function displayLiveStatus(aircraft, emptyText = "No live contact") {
+function displayLiveStatus(
+    aircraft,
+    emptyText = "No live contact",
+    unavailable = false
+) {
     const status = document.getElementById("primary-live-status");
     const source = aircraft && (aircraft.position_source || aircraft.source);
     const remote = Boolean(source && source !== "local");
     status.textContent = aircraft ? "Live" : emptyText;
     status.classList.toggle("is-remote", remote);
-    status.classList.toggle("is-neutral", !aircraft);
+    status.classList.toggle("is-neutral", !aircraft && !unavailable);
+    status.classList.toggle("is-error", !aircraft && unavailable);
 }
 
 function displayAircraftImage(aircraft) {
@@ -1846,7 +1851,8 @@ async function updateAircraftDisplay() {
 
     try {
         const response = await fetch(allAircraftUrl, {
-            signal: controller.signal
+            signal: controller.signal,
+            cache: "no-store"
         });
 
         if (!response.ok) {
@@ -1867,14 +1873,26 @@ async function updateAircraftDisplay() {
                 "Nearest contact";
             clearPrimaryAircraft();
             const fallbackState = response.headers.get("X-Acquisition-State");
+            const sourceState = response.headers.get("X-Source-State");
             const emptyStatus = {
                 requesting: "Requesting fallback",
                 stale: "Fallback stale",
                 rate_limited: "Fallback rate limited",
                 unauthorized: "Fallback unauthorized",
                 error: "Fallback unavailable"
-            }[fallbackState] || "No live contact";
-            displayLiveStatus(null, emptyStatus);
+            }[fallbackState] || {
+                LOCAL_EMPTY_PENDING: "No aircraft",
+                REMOTE_EMPTY: "No aircraft",
+                LOCAL_UNHEALTHY: "Receiver unavailable",
+                REMOTE_UNAVAILABLE: "Data unavailable",
+                OFFLINE: "Offline"
+            }[sourceState] || "No live contact";
+            const unavailable = [
+                "LOCAL_UNHEALTHY", "REMOTE_UNAVAILABLE"
+            ].includes(sourceState) || [
+                "stale", "rate_limited", "unauthorized", "error"
+            ].includes(fallbackState);
+            displayLiveStatus(null, emptyStatus, unavailable);
             renderAircraftList([], null);
             return;
         }
