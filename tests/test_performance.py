@@ -57,6 +57,19 @@ def prepare_database(path, callsign="EXA123"):
 
 
 class DatabaseLifecycleTests(unittest.TestCase):
+    def test_application_starts_only_one_collector_thread(self):
+        thread = Mock()
+        thread.is_alive.return_value = True
+        with (
+            patch.object(web_app, "collector_thread", None),
+            patch.object(web_app, "Thread", return_value=thread) as thread_class,
+        ):
+            web_app.start_aircraft_collector()
+            web_app.start_aircraft_collector()
+
+        thread_class.assert_called_once()
+        thread.start.assert_called_once_with()
+
     def test_connection_commits_and_closes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lifecycle.db"
@@ -153,8 +166,33 @@ class NetworkSettingsTests(unittest.TestCase):
 
         self.assertTrue(row["adsblol_upload_enabled"])
         self.assertTrue(row["remote_aircraft_enabled"])
+        self.assertFalse(row["fallback_aircraft_enabled"])
         self.assertFalse(row["route_enrichment_enabled"])
         self.assertFalse(row["external_tiles_enabled"])
+
+    def test_fallback_default_is_applied_once_and_remains_user_controllable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.db"
+            with connect_database(path, rows=True) as conn:
+                ensure_mode_settings(conn)
+                first = conn.execute(
+                    "SELECT fallback_aircraft_enabled "
+                    "FROM app_settings WHERE id = 1"
+                ).fetchone()
+                self.assertFalse(first["fallback_aircraft_enabled"])
+
+                conn.execute("""
+                    UPDATE app_settings
+                    SET fallback_aircraft_enabled = 0
+                    WHERE id = 1
+                """)
+                ensure_mode_settings(conn)
+                second = conn.execute(
+                    "SELECT fallback_aircraft_enabled "
+                    "FROM app_settings WHERE id = 1"
+                ).fetchone()
+
+        self.assertFalse(second["fallback_aircraft_enabled"])
 
     def test_offline_missing_tile_performs_no_external_request(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -436,6 +474,32 @@ class CollectorAndHistoryTests(unittest.TestCase):
             "source_fetched_at": now,
             "source": "local",
         }
+
+    def test_collector_stop_event_closes_owned_resources(self):
+        stop_event = Mock()
+        stop_event.is_set.return_value = True
+        feeder = Mock()
+        remote_poller = Mock()
+        fallback_poller = Mock()
+        with (
+            patch.object(collector, "Database") as database,
+            patch.object(
+                collector, "ADSBLolFeeder", return_value=feeder
+            ),
+            patch.object(
+                collector, "RemoteAircraftPoller", return_value=remote_poller
+            ),
+            patch.object(
+                collector, "ClosestAircraftFallback",
+                return_value=fallback_poller,
+            ),
+        ):
+            collector.run_collector(stop_event=stop_event)
+
+        database.return_value.get_collection_settings.assert_not_called()
+        feeder.stop.assert_called_once_with()
+        remote_poller.shutdown.assert_called_once_with()
+        fallback_poller.shutdown.assert_called_once_with()
 
     def test_history_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -726,7 +790,7 @@ class CollectorAndHistoryTests(unittest.TestCase):
         class FakeDatabase:
             def get_collection_settings(self):
                 return (True, True, 50, 33.5, -117.1, True, "local", 30005,
-                        True, True, True)
+                        True, False, True, True, "public")
 
             def enrich_local_aircraft(self, payload):
                 return payload
@@ -754,6 +818,100 @@ class CollectorAndHistoryTests(unittest.TestCase):
         adsb.GET_point.assert_not_called()
         feeder_sync.assert_called_once_with(False, "local", 30005)
         self.assertEqual(len(fake_database.updated), 1)
+
+    def test_collector_starts_fallback_only_without_eligible_local(self):
+        updates = []
+        statuses = []
+
+        class FakeDatabase:
+            def get_collection_settings(self):
+                return (True, True, 50, 33.5, -117.1, True, "local", 30005,
+                        False, False, True, False, "public")
+
+            def enrich_local_aircraft(self, payload):
+                return payload
+
+            def update_ac(self, data, authoritative_sources=None):
+                updates.append(data)
+
+            def update_collector_status(self, **values):
+                statuses.append(values)
+
+        now = 1_800_000_000
+        empty_local = {
+            "ac": [], "now": now, "source_fetched_at": now,
+            "source": "local",
+        }
+        remote = self.aircraft()
+        remote.update({
+            "position_observed_at": now,
+            "message_observed_at": now,
+            "source": "remote_closest",
+            "position_source": "remote_closest",
+        })
+        adsb = ADSB_LOL(lat=33.5, lon=-117.1)
+        adsb.GET_closest = Mock(return_value=[remote])
+
+        def yield_to_worker(_seconds):
+            deadline = time.monotonic() + 1
+            while adsb.GET_closest.call_count == 0 and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+        with (
+            patch.object(collector, "Database", return_value=FakeDatabase()),
+            patch.object(
+                collector.LocalReceiver,
+                "get_aircraft",
+                return_value=empty_local,
+            ),
+            patch.object(collector.ADSBLolFeeder, "sync"),
+        ):
+            collector.run_collector(
+                adsb,
+                max_iterations=4,
+                monotonic_clock=lambda: 100,
+                wall_clock=lambda: now,
+                sleeper=yield_to_worker,
+            )
+
+        self.assertEqual(adsb.GET_closest.call_count, 1)
+        self.assertEqual(updates[-1][0]["hex"], remote["hex"])
+        self.assertEqual(statuses[-1]["acquisition_policy"], "local_with_fallback")
+        self.assertEqual(statuses[-1]["eligible_local_position_count"], 0)
+
+    def test_eligible_local_position_suppresses_fallback(self):
+        statuses = []
+
+        class FakeDatabase:
+            def get_collection_settings(self):
+                return (True, True, 15, 33.5, -117.1, True, "local", 30005,
+                        False, False, True, False, "public")
+
+            def enrich_local_aircraft(self, payload):
+                return payload
+
+            def update_ac(self, _data, authoritative_sources=None):
+                pass
+
+            def update_collector_status(self, **values):
+                statuses.append(values)
+
+        adsb = ADSB_LOL(lat=33.5, lon=-117.1)
+        adsb.GET_closest = Mock(return_value=[])
+        with (
+            patch.object(collector, "Database", return_value=FakeDatabase()),
+            patch.object(
+                collector.LocalReceiver,
+                "get_aircraft",
+                return_value=self.receiver_payload(),
+            ),
+            patch.object(collector.ADSBLolFeeder, "sync"),
+        ):
+            collector.run_collector(adsb, max_iterations=1, sleeper=lambda _seconds: None)
+
+        adsb.GET_closest.assert_not_called()
+        self.assertEqual(statuses[-1]["eligible_local_position_count"], 1)
+        self.assertEqual(statuses[-1]["fallback_status"], "local")
 
 
 class FrontendRegressionTests(unittest.TestCase):

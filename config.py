@@ -18,9 +18,13 @@ RUNTIME_DIR = APP_DIR / ".runtime"
 # it, while rate-limiting the selected adsb.lol endpoint independently.
 AIRCRAFT_REFRESH_SECONDS = 1
 LOCAL_RECEIVER_POLL_SECONDS = 1
-ADSB_LOL_POLL_SECONDS = 10
+ADSB_LOL_POLL_SECONDS = 30
+# The shared collector uses fallback acquisition only when no eligible fresh
+# local position exists. Keep it independent from continuous remote polling.
+ADSB_LOL_CLOSEST_POLL_SECONDS = 15
 # Invalid or expired Retry-After guidance must never create a tight loop.
 REMOTE_RETRY_MIN_SECONDS = 60
+REMOTE_RETRY_MAX_SECONDS = 15 * 60
 # Selected-aircraft trails/details are intentionally slower than snapshots.
 AIRCRAFT_DETAIL_REFRESH_SECONDS = 7
 # All persisted times below are UTC Unix seconds. Scheduling still uses a
@@ -45,6 +49,7 @@ DEFAULT_RECEIVER_ADDRESS = "/run/readsb/aircraft.json"
 DEFAULT_RECEIVER_BEAST_PORT = 30005
 DEFAULT_ADSB_LOL_FEED_ENABLED = False
 DEFAULT_REMOTE_AIRCRAFT_ENABLED = False
+DEFAULT_FALLBACK_AIRCRAFT_ENABLED = False
 DEFAULT_REMOTE_ENDPOINT_PREFERENCE = "auto"
 DEFAULT_ROUTE_ENRICHMENT_ENABLED = False
 DEFAULT_EXTERNAL_TILES_ENABLED = False
@@ -52,7 +57,6 @@ DEFAULT_OFFLINE_MODE_ENABLED = False
 DEFAULT_CONSTRAINED_PROFILE_ENABLED = True
 SEARCH_RANGE_OPTIONS = {15, 25, 50}
 MAX_COLLECTION_RANGE = 50
-STALE_PASS_LIMIT = 3
 POSITION_CHANGE_EPSILON = 0.00001
 POSITION_RECORD_MIN_SECONDS = 5
 HISTORY_MAX_AGE_SECONDS = 60 * 60

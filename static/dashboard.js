@@ -353,6 +353,9 @@ const adsblolUploadInput = document.getElementById(
 const remoteAircraftInput = document.getElementById(
     "remote-aircraft-enabled"
 );
+const fallbackAircraftInput = document.getElementById(
+    "fallback-aircraft-enabled"
+);
 const remoteEndpointPreferenceInput = document.getElementById(
     "remote-endpoint-preference"
 );
@@ -477,6 +480,7 @@ function displayCoordinates(coordinates) {
         [offlineModeInput, "offline_mode_enabled"],
         [adsblolUploadInput, "adsblol_upload_enabled"],
         [remoteAircraftInput, "remote_aircraft_enabled"],
+        [fallbackAircraftInput, "fallback_aircraft_enabled"],
         [routeEnrichmentInput, "route_enrichment_enabled"],
         [externalTilesInput, "external_tiles_enabled"],
         [constrainedProfileInput, "constrained_profile_enabled"]
@@ -494,7 +498,13 @@ function displayCoordinates(coordinates) {
             "constrained-device",
             constrainedProfile
         );
-        ensureAnimationLoop();
+        if (constrainedProfile) {
+            stopAnimationLoop();
+            aircraftMotionStates.clear();
+        } else {
+            updateAircraftMarkers(visibleAircraft);
+            ensureAnimationLoop();
+        }
     }
     if (coordinates.remote_endpoint_preference !== undefined) {
         remoteEndpointPreferenceInput.value =
@@ -618,6 +628,7 @@ async function saveCoordinates(event) {
                 receiver_beast_port: Number(receiverBeastPortInput.value),
                 adsblol_upload_enabled: adsblolUploadInput.checked,
                 remote_aircraft_enabled: remoteAircraftInput.checked,
+                fallback_aircraft_enabled: fallbackAircraftInput.checked,
                 remote_endpoint_preference: remoteEndpointPreferenceInput.value,
                 route_enrichment_enabled: routeEnrichmentInput.checked,
                 external_tiles_enabled: externalTilesInput.checked,
@@ -724,6 +735,7 @@ for (const [input, setting, label] of [
     [offlineModeInput, "offline_mode_enabled", "Offline mode"],
     [adsblolUploadInput, "adsblol_upload_enabled", "adsb.lol upload"],
     [remoteAircraftInput, "remote_aircraft_enabled", "Remote aircraft"],
+    [fallbackAircraftInput, "fallback_aircraft_enabled", "Remote fallback"],
     [routeEnrichmentInput, "route_enrichment_enabled", "Route lookup"],
     [externalTilesInput, "external_tiles_enabled", "Map downloads"],
     [
@@ -762,7 +774,8 @@ function escapeHtml(value) {
 
 function displayValue(elementId, value, suffix = "") {
     const element = document.getElementById(elementId);
-    element.textContent = isMissing(value) ? "N/A" : `${value}${suffix}`;
+    const text = isMissing(value) ? "N/A" : `${value}${suffix}`;
+    if (element.textContent !== text) element.textContent = text;
 }
 
 function displayNumber(elementId, value, decimals, suffix) {
@@ -845,6 +858,21 @@ function clearPrimaryAircraft() {
     setRouteAirportHighlights(null);
     primaryDetailHex = null;
     detailScheduler.clear();
+    displayLiveStatus(null);
+}
+
+function displayLiveStatus(
+    aircraft,
+    emptyText = "No live contact",
+    unavailable = false
+) {
+    const status = document.getElementById("primary-live-status");
+    const source = aircraft && (aircraft.position_source || aircraft.source);
+    const remote = Boolean(source && source !== "local");
+    status.textContent = aircraft ? "Live" : emptyText;
+    status.classList.toggle("is-remote", remote);
+    status.classList.toggle("is-neutral", !aircraft && !unavailable);
+    status.classList.toggle("is-error", !aircraft && unavailable);
 }
 
 function displayAircraftImage(aircraft) {
@@ -964,6 +992,7 @@ function displayPrimaryAircraft(
     displayNumber("closest-range", aircraft.range, 1, " nm");
     displayNumber("closest-alt_baro", aircraft.alt_baro, 0, " ft");
     displayNumber("closest-gs", aircraft.gs, 1, " kt");
+    displayLiveStatus(aircraft);
     displayAircraftImage(aircraft);
     if (updateRoute) {
         displayRoute(aircraft, routeIsLoading);
@@ -1428,8 +1457,20 @@ function updateAircraftMotion(item, marker, latitude, longitude) {
 
 let lastMotionFrame = 0;
 let animationLoopRunning = false;
+let motionFrameId = null;
+
+function stopAnimationLoop() {
+    if (motionFrameId !== null) window.cancelAnimationFrame(motionFrameId);
+    motionFrameId = null;
+    animationLoopRunning = false;
+}
 
 function animateAircraftMarkers(frameTime) {
+    motionFrameId = null;
+    if (constrainedProfile || document.hidden || aircraftMotionStates.size === 0) {
+        stopAnimationLoop();
+        return;
+    }
     if (!constrainedProfile && !document.hidden && frameTime - lastMotionFrame >= 50) {
         const now = Date.now();
         const projectionLimitMs = Math.min(
@@ -1495,14 +1536,14 @@ function animateAircraftMarkers(frameTime) {
     if (constrainedProfile) {
         animationLoopRunning = false;
     } else {
-        window.requestAnimationFrame(animateAircraftMarkers);
+        motionFrameId = window.requestAnimationFrame(animateAircraftMarkers);
     }
 }
 
 function ensureAnimationLoop() {
-    if (!constrainedProfile && !animationLoopRunning) {
+    if (!constrainedProfile && !document.hidden && aircraftMotionStates.size > 0 && !animationLoopRunning) {
         animationLoopRunning = true;
-        window.requestAnimationFrame(animateAircraftMarkers);
+        motionFrameId = window.requestAnimationFrame(animateAircraftMarkers);
     }
 }
 
@@ -1607,7 +1648,9 @@ function updateAircraftMarkers(aircraft) {
 
         updateAircraftMarkerAppearance(marker, item);
 
-        updateAircraftMotion(item, marker, latitude, longitude);
+        if (!constrainedProfile) {
+            updateAircraftMotion(item, marker, latitude, longitude);
+        }
         if (constrainedProfile) {
             const current = marker.getLatLng();
             if (current.lat !== latitude || current.lng !== longitude) {
@@ -1638,6 +1681,8 @@ function updateAircraftMarkers(aircraft) {
             aircraftMotionStates.delete(hex);
         }
     }
+    if (aircraftMotionStates.size === 0) stopAnimationLoop();
+    else ensureAnimationLoop();
 }
 
 map.on("zoomend", () => {
@@ -1806,7 +1851,8 @@ async function updateAircraftDisplay() {
 
     try {
         const response = await fetch(allAircraftUrl, {
-            signal: controller.signal
+            signal: controller.signal,
+            cache: "no-store"
         });
 
         if (!response.ok) {
@@ -1826,6 +1872,27 @@ async function updateAircraftDisplay() {
             document.getElementById("primary-heading").textContent =
                 "Nearest contact";
             clearPrimaryAircraft();
+            const fallbackState = response.headers.get("X-Acquisition-State");
+            const sourceState = response.headers.get("X-Source-State");
+            const emptyStatus = {
+                requesting: "Requesting fallback",
+                stale: "Fallback stale",
+                rate_limited: "Fallback rate limited",
+                unauthorized: "Fallback unauthorized",
+                error: "Fallback unavailable"
+            }[fallbackState] || {
+                LOCAL_EMPTY_PENDING: "No aircraft",
+                REMOTE_EMPTY: "No aircraft",
+                LOCAL_UNHEALTHY: "Receiver unavailable",
+                REMOTE_UNAVAILABLE: "Data unavailable",
+                OFFLINE: "Offline"
+            }[sourceState] || "No live contact";
+            const unavailable = [
+                "LOCAL_UNHEALTHY", "REMOTE_UNAVAILABLE"
+            ].includes(sourceState) || [
+                "stale", "rate_limited", "unauthorized", "error"
+            ].includes(fallbackState);
+            displayLiveStatus(null, emptyStatus, unavailable);
             renderAircraftList([], null);
             return;
         }
@@ -1877,6 +1944,7 @@ async function updateAircraftDisplay() {
     }
 }
 
+let diagnosticsInFlight = false;
 let frontendUpdateCount = 0;
 let frontendUpdateTotalMs = 0;
 let frontendLastReport = performance.now();
@@ -1900,18 +1968,27 @@ function recordFrontendUpdate(durationMs) {
         snapshotDataFresh: snapshotGuard.dataFresh,
         selectedDetailFailures
     });
-    fetch(frontendDiagnosticsUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            selected_detail_failures: selectedDetailFailures,
-            trail_revision: primaryTrailRevision,
-            trail_segment_count: primaryTrailSegmentId === null ? 0 : 1,
-            trail_point_count: primaryPathLine.getLatLngs().length
-        })
-    }).catch((error) => {
-        console.error("Could not report frontend diagnostics:", error);
-    });
+    if (!diagnosticsInFlight) {
+        diagnosticsInFlight = true;
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 5000);
+        fetch(frontendDiagnosticsUrl, {
+            signal: controller.signal,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                selected_detail_failures: selectedDetailFailures,
+                trail_revision: primaryTrailRevision,
+                trail_segment_count: primaryTrailSegmentId === null ? 0 : 1,
+                trail_point_count: primaryPathLine.getLatLngs().length
+            })
+        }).catch((error) => {
+            console.error("Could not report frontend diagnostics:", error);
+        }).finally(() => {
+            window.clearTimeout(timeout);
+            diagnosticsInFlight = false;
+        });
+    }
     frontendUpdateCount = 0;
     frontendUpdateTotalMs = 0;
     frontendLastReport = now;
@@ -1919,6 +1996,7 @@ function recordFrontendUpdate(durationMs) {
 
 document.addEventListener("visibilitychange", () => {
     detailScheduler.setVisible(!document.hidden);
+    if (document.hidden) stopAnimationLoop();
     if (!document.hidden) {
         updateAircraftDisplay();
         ensureAnimationLoop();

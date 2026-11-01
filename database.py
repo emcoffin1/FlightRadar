@@ -18,9 +18,55 @@ from config import (
     DEFAULT_RECEIVER_BEAST_PORT,
     DEFAULT_REMOTE_ENDPOINT_PREFERENCE,
     DEFAULT_REMOTE_AIRCRAFT_ENABLED,
+    DEFAULT_FALLBACK_AIRCRAFT_ENABLED,
     DEFAULT_ROUTE_ENRICHMENT_ENABLED,
     DEFAULT_SEARCH_RANGE,
 )
+
+
+COLLECTOR_STATUS_COLUMN_DEFINITIONS = {
+    "heartbeat_at": "REAL",
+    "local_snapshot_generated_at": "REAL",
+    "local_fetched_at": "REAL",
+    "local_error": "TEXT",
+    "remote_provider": "TEXT",
+    "remote_last_success_at": "REAL",
+    "remote_snapshot_generated_at": "REAL",
+    "remote_next_retry_at": "REAL",
+    "remote_status": "TEXT NOT NULL DEFAULT 'disabled'",
+    "remote_error": "TEXT",
+    "acquisition_policy": "TEXT NOT NULL DEFAULT 'local_only'",
+    "eligible_local_position_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_provider": "TEXT",
+    "fallback_status": "TEXT NOT NULL DEFAULT 'disabled'",
+    "fallback_in_flight": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_last_attempt_at": "REAL",
+    "fallback_last_success_at": "REAL",
+    "fallback_next_request_at": "REAL",
+    "fallback_http_status": "INTEGER",
+    "fallback_error": "TEXT",
+    "fallback_request_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_valid_snapshot_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_stale_rejection_count": "INTEGER NOT NULL DEFAULT 0",
+    "fallback_consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+    "local_message_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "local_position_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_message_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_position_fresh_count": "INTEGER NOT NULL DEFAULT 0",
+    "rejected_stale_positions": "INTEGER NOT NULL DEFAULT 0",
+    "upload_relay_running": "INTEGER NOT NULL DEFAULT 0",
+    "source_manager_state": "TEXT NOT NULL DEFAULT 'LOCAL_UNHEALTHY'",
+    "local_snapshot_valid": "INTEGER NOT NULL DEFAULT 0",
+    "local_empty_streak": "INTEGER NOT NULL DEFAULT 0",
+    "local_failure_streak": "INTEGER NOT NULL DEFAULT 0",
+    "local_recovery_streak": "INTEGER NOT NULL DEFAULT 0",
+    "remote_http_status": "INTEGER",
+    "remote_request_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_valid_snapshot_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_stale_rejection_count": "INTEGER NOT NULL DEFAULT 0",
+    "remote_consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+}
+COLLECTOR_STATUS_FIELDS = frozenset(COLLECTOR_STATUS_COLUMN_DEFINITIONS)
 
 
 def decode_database_flags(value):
@@ -34,7 +80,10 @@ def decode_database_flags(value):
 
 @contextmanager
 def connect_database(db_path=DATABASE_PATH, *, rows=False):
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(db_path, timeout=5)
+    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
     connection.execute("PRAGMA foreign_keys = ON")
     if rows:
         connection.row_factory = sqlite3.Row
@@ -198,6 +247,10 @@ def ensure_aircraft_schema(conn, *, create_table=False):
         ON adsb_data (lower(hex))
     """)
     conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_adsb_data_hex
+        ON adsb_data (hex)
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS route_cache (
             callsign TEXT PRIMARY KEY,
             airline TEXT,
@@ -212,36 +265,25 @@ def ensure_aircraft_schema(conn, *, create_table=False):
             updated_at REAL NOT NULL
         )
     """)
-    conn.execute("""
+    status_definitions = ",\n            ".join(
+        f"{name} {definition}"
+        for name, definition in COLLECTOR_STATUS_COLUMN_DEFINITIONS.items()
+    )
+    conn.execute(f"""
         CREATE TABLE IF NOT EXISTS collector_status (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            heartbeat_at REAL,
-            local_snapshot_generated_at REAL,
-            local_fetched_at REAL,
-            local_error TEXT,
-            remote_provider TEXT,
-            remote_last_success_at REAL,
-            remote_snapshot_generated_at REAL,
-            remote_next_retry_at REAL,
-            remote_status TEXT NOT NULL DEFAULT 'disabled',
-            remote_error TEXT,
-            local_message_fresh_count INTEGER NOT NULL DEFAULT 0,
-            local_position_fresh_count INTEGER NOT NULL DEFAULT 0,
-            remote_message_fresh_count INTEGER NOT NULL DEFAULT 0,
-            remote_position_fresh_count INTEGER NOT NULL DEFAULT 0,
-            rejected_stale_positions INTEGER NOT NULL DEFAULT 0,
-            upload_relay_running INTEGER NOT NULL DEFAULT 0
+            {status_definitions}
         )
     """)
     status_columns = {
         row[1]
         for row in conn.execute("PRAGMA table_info(collector_status)").fetchall()
     }
-    if "upload_relay_running" not in status_columns:
-        conn.execute(
-            "ALTER TABLE collector_status ADD COLUMN upload_relay_running "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
+    for name, definition in COLLECTOR_STATUS_COLUMN_DEFINITIONS.items():
+        if name not in status_columns:
+            conn.execute(
+                f"ALTER TABLE collector_status ADD COLUMN {name} {definition}"
+            )
     conn.execute("""
         INSERT OR IGNORE INTO collector_status (id) VALUES (1)
     """)
@@ -357,12 +399,14 @@ def ensure_mode_settings(conn):
             adsblol_feed_enabled INTEGER NOT NULL DEFAULT 0,
             adsblol_upload_enabled INTEGER NOT NULL DEFAULT 0,
             remote_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
+            fallback_aircraft_enabled INTEGER NOT NULL DEFAULT 0,
             route_enrichment_enabled INTEGER NOT NULL DEFAULT 0,
             external_tiles_enabled INTEGER NOT NULL DEFAULT 0,
             offline_mode_enabled INTEGER NOT NULL DEFAULT 0,
             constrained_profile_enabled INTEGER NOT NULL DEFAULT 1,
             network_settings_migrated INTEGER NOT NULL DEFAULT 1,
             local_default_applied INTEGER NOT NULL DEFAULT 1,
+            fallback_default_applied INTEGER NOT NULL DEFAULT 1,
             remote_endpoint_preference TEXT NOT NULL DEFAULT 'auto'
         )
     """)
@@ -421,6 +465,7 @@ def ensure_mode_settings(conn):
     network_columns = {
         "adsblol_upload_enabled": int(DEFAULT_ADSB_LOL_FEED_ENABLED),
         "remote_aircraft_enabled": int(DEFAULT_REMOTE_AIRCRAFT_ENABLED),
+        "fallback_aircraft_enabled": int(DEFAULT_FALLBACK_AIRCRAFT_ENABLED),
         "route_enrichment_enabled": int(DEFAULT_ROUTE_ENRICHMENT_ENABLED),
         "external_tiles_enabled": int(DEFAULT_EXTERNAL_TILES_ENABLED),
         "offline_mode_enabled": 0,
@@ -477,6 +522,18 @@ def ensure_mode_settings(conn):
         WHERE local_default_applied = 0
     """)
 
+    # Preserve an existing choice. New installations and legacy databases do
+    # not silently gain external fallback traffic.
+    if "fallback_default_applied" not in columns:
+        conn.execute(
+            "ALTER TABLE app_settings "
+            "ADD COLUMN fallback_default_applied INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute("""
+        UPDATE app_settings SET fallback_default_applied = 1
+        WHERE fallback_default_applied = 0
+    """)
+
     conn.execute("""
         UPDATE app_settings
         SET search_range_nm = ?
@@ -496,14 +553,16 @@ def ensure_mode_settings(conn):
             adsblol_feed_enabled,
             adsblol_upload_enabled,
             remote_aircraft_enabled,
+            fallback_aircraft_enabled,
             route_enrichment_enabled,
             external_tiles_enabled,
             offline_mode_enabled,
             constrained_profile_enabled,
             network_settings_migrated,
             local_default_applied,
+            fallback_default_applied,
             remote_endpoint_preference
-        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
+        ) VALUES (1, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?)
     """, (
         DEFAULT_LAT,
         DEFAULT_LON,
@@ -514,6 +573,7 @@ def ensure_mode_settings(conn):
         int(DEFAULT_ADSB_LOL_FEED_ENABLED),
         int(DEFAULT_ADSB_LOL_FEED_ENABLED),
         int(DEFAULT_REMOTE_AIRCRAFT_ENABLED),
+        int(DEFAULT_FALLBACK_AIRCRAFT_ENABLED),
         int(DEFAULT_ROUTE_ENRICHMENT_ENABLED),
         int(DEFAULT_EXTERNAL_TILES_ENABLED),
         0,

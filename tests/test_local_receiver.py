@@ -89,12 +89,14 @@ class LocalDataTests(unittest.TestCase):
         remote = [{
             "hex": "abc123", "lat": 1, "lon": 2, "t": "C17",
             "r": "01-0001", "flag": ["Military"],
-            "position_observed_at": 100,
+            "range": 10, "position_observed_at": 100,
+            "position_source": "remote_public",
         }]
         local = [{
             "hex": "abc123", "lat": 3, "lon": 4, "t": "NA",
             "r": "NA", "flag": ["NA"],
-            "position_observed_at": 200,
+            "range": 5, "position_observed_at": 200,
+            "position_source": "local",
         }]
         result = merge_aircraft(remote, local)[0]
         self.assertEqual((result["lat"], result["lon"]), (3, 4))
@@ -266,7 +268,7 @@ class SettingsMigrationTests(unittest.TestCase):
                 return connect_database(path, rows=rows)
 
             with patch.object(web_app, "connect_database", isolated_connection):
-                response = web_app.app.test_client().get("/")
+                response = web_app.app.test_client().get("/extra")
 
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
@@ -317,6 +319,26 @@ class AircraftMetadataTests(unittest.TestCase):
 
 
 class AircraftAssetTests(unittest.TestCase):
+    def test_common_unmapped_families_now_have_local_photos(self):
+        expected = {
+            "BE95": "baron.jpg",
+            "M20P": "mooney.jpg",
+            "DA40": "da40.jpg",
+            "C310": "cessna_twin.jpg",
+            "GLID": "glider.jpg",
+            "BALL": "balloon.jpg",
+            "ULAC": "ultralight.jpg",
+            "B06": "bell407.webp",
+            "BE20": "kingair.webp",
+            "RV6": "rv7.webp",
+        }
+        with web_app.app.test_request_context():
+            for type_code, filename in expected.items():
+                with self.subTest(type_code=type_code):
+                    self.assertTrue(
+                        web_app.aircraft_image_url(type_code).endswith(filename)
+                    )
+
     def test_common_helicopter_types_use_rotorcraft_assets(self):
         with web_app.app.test_request_context():
             self.assertTrue(web_app.aircraft_icon_url("B407").endswith("R44.svg"))

@@ -1,0 +1,214 @@
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+import app as web_app
+from database import connect_database, ensure_aircraft_schema, ensure_mode_settings
+
+
+class BasicDisplayTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js unavailable")
+    def test_basic_client_behavior(self):
+        root = Path(__file__).resolve().parents[1]
+        for filename in ["basic_display_test.js", "animation_loop_test.js"]:
+            with self.subTest(filename=filename):
+                result = subprocess.run(
+                    ["node", str(root / "tests" / filename)],
+                    cwd=root, capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "basic.db"
+        self.now = time.time()
+        with connect_database(self.path) as conn:
+            ensure_aircraft_schema(conn, create_table=True)
+            ensure_mode_settings(conn)
+            conn.execute("UPDATE collector_status SET heartbeat_at = ? WHERE id = 1", (self.now,))
+            for hex_value, distance, age in [("near01", 1, 0), ("far001", 4, 0), ("old001", .2, 100), ("out001", 999, 0)]:
+                conn.execute("""
+                    INSERT INTO adsb_data (hex, callsign, r, t, range, lat, lon,
+                        position_observed_at, source)
+                    VALUES (?, ?, 'N123AB', 'C172', ?, 33, -118, ?, 'local')
+                """, (hex_value, hex_value.upper(), distance, self.now - age))
+        def connection(*, rows=False):
+            return connect_database(self.path, rows=rows)
+        patcher = patch.object(web_app, "connect_database", connection)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = web_app.app.test_client()
+
+    def test_nearest_snapshot_includes_image_and_airport_route(self):
+        route = {
+            "route_status": "ready",
+            "departure": "LAX",
+            "departure_name": "Los Angeles International Airport",
+            "destination": "SFO",
+            "destination_name": "San Francisco International Airport",
+        }
+
+        def resolve(aircraft):
+            return {**aircraft, **route}
+
+        with (
+            patch.object(web_app, "resolve_aircraft_route", side_effect=resolve),
+            patch.object(
+                web_app,
+                "aircraft_image_url",
+                return_value="/static/aircraft_photos/c172.webp",
+            ),
+        ):
+            response = self.client.get("/api/aircraft/nearest")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        aircraft = response.get_json()["aircraft"]
+        self.assertEqual(aircraft["hex"], "near01")
+        self.assertEqual(aircraft["r"], "N123AB")
+        self.assertEqual(aircraft["departure"], "LAX")
+        self.assertEqual(aircraft["destination_name"], route["destination_name"])
+        self.assertEqual(
+            aircraft["aircraft_image"],
+            "/static/aircraft_photos/c172.webp",
+        )
+        self.assertNotIn("path", aircraft)
+
+    def test_departed_aircraft_switches_to_next_fresh_contact(self):
+        with connect_database(self.path) as conn:
+            conn.execute("UPDATE adsb_data SET position_observed_at = ? WHERE hex = 'near01'", (self.now - 100,))
+        self.assertEqual(self.client.get("/api/aircraft/nearest").get_json()["aircraft"]["hex"], "far001")
+
+    def test_stale_collector_and_empty_snapshot_clear_aircraft(self):
+        with connect_database(self.path) as conn:
+            conn.execute("UPDATE collector_status SET heartbeat_at = ?", (self.now - 100,))
+        payload = self.client.get("/api/aircraft/nearest").get_json()
+        self.assertIsNone(payload["aircraft"])
+        self.assertFalse(payload["collector_fresh"])
+        with connect_database(self.path) as conn:
+            conn.execute("UPDATE collector_status SET heartbeat_at = ?", (self.now,))
+            conn.execute("DELETE FROM adsb_data")
+        payload = self.client.get("/api/aircraft/nearest").get_json()
+        self.assertIsNone(payload["aircraft"])
+        self.assertTrue(payload["collector_fresh"])
+
+    def test_remote_database_position_is_orange(self):
+        with connect_database(self.path) as conn:
+            conn.execute("""
+                UPDATE adsb_data
+                SET source = 'local+remote_public',
+                    position_source = 'remote_public'
+                WHERE hex = 'near01'
+            """)
+        payload = self.client.get("/api/aircraft/nearest").get_json()
+        self.assertEqual(payload["aircraft"]["hex"], "near01")
+        self.assertEqual(payload["live_source"], "remote")
+
+    def test_empty_snapshot_reports_fallback_state(self):
+        with connect_database(self.path) as conn:
+            conn.execute("DELETE FROM adsb_data")
+            conn.execute("""
+                UPDATE collector_status
+                SET fallback_status = 'requesting'
+                WHERE id = 1
+            """)
+        payload = self.client.get("/api/aircraft/nearest").get_json()
+        self.assertIsNone(payload["aircraft"])
+        self.assertEqual(payload["display_state"], "requesting")
+        self.assertEqual(payload["status_message"], "Requesting fallback")
+
+    def test_diagnostics_exposes_acquisition_and_position_provenance(self):
+        with connect_database(self.path) as conn:
+            conn.execute("""
+                UPDATE adsb_data
+                SET position_source = 'remote_fallback_public'
+                WHERE hex = 'near01'
+            """)
+            conn.execute("""
+                UPDATE collector_status
+                SET acquisition_policy = 'local_with_fallback',
+                    eligible_local_position_count = 0,
+                    fallback_provider = 'public',
+                    fallback_status = 'remote_fallback',
+                    fallback_request_count = 3
+                WHERE id = 1
+            """)
+        payload = self.client.get("/api/diagnostics").get_json()
+        acquisition = payload["acquisition"]
+        self.assertEqual(acquisition["policy"], "local_with_fallback")
+        self.assertEqual(acquisition["provider"], "public")
+        self.assertEqual(acquisition["selected"]["position_source"], "remote_fallback_public")
+        self.assertEqual(acquisition["fallback"]["request_count"], 3)
+
+    def test_live_endpoints_disable_browser_caching(self):
+        for path in ["/api/aircraft", "/api/aircraft/nearest", "/api/diagnostics"]:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self.client.get(path).headers.get("Cache-Control"),
+                    "no-store",
+                )
+
+    def test_health_distinguishes_process_liveness_from_collector_readiness(self):
+        self.assertEqual(self.client.get("/api/health/live").status_code, 200)
+        self.assertEqual(self.client.get("/api/health/ready").status_code, 200)
+        with connect_database(self.path) as conn:
+            conn.execute(
+                "UPDATE collector_status SET heartbeat_at = ? WHERE id = 1",
+                (self.now - 100,),
+            )
+        response = self.client.get("/api/health/ready")
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.get_json()["ready"])
+
+    def test_collector_failure_requests_supervisor_restart(self):
+        with (
+            patch.object(web_app, "run_collector", side_effect=RuntimeError("boom")),
+            patch.object(web_app.os, "_exit") as exit_process,
+        ):
+            web_app._run_supervised_collector()
+        exit_process.assert_called_once_with(1)
+
+    def test_basic_document_loads_only_lightweight_scripts(self):
+        page = self.client.get("/basic").get_data(as_text=True)
+        self.assertIn("basic.js", page)
+        self.assertIn('id="aircraft-image"', page)
+        self.assertIn('aria-label="Airport locations"', page)
+        self.assertIn('<dt>Track</dt><dd><span id="track">—</span></dd>', page)
+        self.assertNotIn('<span id="track">—</span> <small>°</small>', page)
+        for heavy_resource in ["leaflet.js", "dashboard.js", "detail_scheduler.js", "aircraft_photos", "fonts/"]:
+            self.assertNotIn(heavy_resource, page)
+        self.assertIn('href="/extra"', page)
+
+    def test_root_boots_into_reversionary_display(self):
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("Nearest aircraft", page)
+        self.assertIn('href="/extra"', page)
+
+        extra = self.client.get("/extra").get_data(as_text=True)
+        self.assertIn('aria-label="Switch to Basic display"', extra)
+
+    def test_registration_is_reserved_a_single_line(self):
+        root = Path(__file__).resolve().parents[1]
+        stylesheet = (root / "static" / "basic.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("#registration { flex: 0 0 auto; white-space: nowrap;", stylesheet)
+
+    def test_callsign_is_sized_to_remain_on_one_line(self):
+        root = Path(__file__).resolve().parents[1]
+        stylesheet = (root / "static" / "basic.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "font-size: clamp(32px, 8vw, 120px)",
+            stylesheet,
+        )
+        self.assertIn("white-space: nowrap", stylesheet)
+
+
+if __name__ == "__main__":
+    unittest.main()

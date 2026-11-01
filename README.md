@@ -25,8 +25,10 @@ The receiver address accepts any of these forms:
   `http://<address>/readsb/aircraft.json`.
 
 Local receiver JSON is enabled by default and polled every 1 second. Public
-adsb.lol retrieval uses `ADSB_LOL_POLL_SECONDS` in `config.py` (currently 10
-seconds). The local and public snapshots are merged by ICAO hex; fresh local
+adsb.lol fallback retrieval uses `ADSB_LOL_CLOSEST_POLL_SECONDS` in `config.py`
+(currently 15 seconds). Continuous remote retrieval, when explicitly enabled,
+uses `ADSB_LOL_POLL_SECONDS` (currently 30 seconds). The local and public
+snapshots are merged by ICAO hex; fresh local
 metadata is preferred when present, while the freshest valid position wins.
 
 Remote requests run in one bounded background worker. A DNS failure, timeout,
@@ -42,9 +44,12 @@ The coordinate dialog persists these independent settings in `aircraft.db`:
 - **Use local receiver** reads the configured local/LAN `aircraft.json`.
 - **Upload to adsb.lol** relays local Beast data; it does not enable retrieval.
 - **Remote adsb.lol aircraft** polls the public point API; it does not upload.
+- **Remote fallback when local is empty** enables the 15-second fallback
+  policy without enabling continuous remote collection.
 - **Remote endpoint** selects `auto`, the public point API, or feeder-only
-  re-api. `auto` prefers re-api only when local reception and this app's upload
-  relay are both enabled. Selecting `feeder` supports a feed managed elsewhere.
+  re-api. `auto` uses the public API. Uploading does not prove feeder re-api
+  authorization; select `feeder` only when adsb.lol has approved the backend's
+  public IP.
 - **External route lookup** permits background ADSBDB/HexDB lookups.
 - **Download map tiles** permits OpenStreetMap cache misses and revalidation.
 - **Offline mode** overrides every external option without disabling local data.
@@ -136,6 +141,12 @@ curl -fL \
 
 FlightRadar imports this file into its local SQLite database and enriches
 receiver contacts by ICAO hex. No external request is made during lookup.
+Aircraft reference photographs are also resolved locally by ICAO type code;
+the browser never calls an aircraft-photo API. The bundled family mappings
+currently cover about 71% of typed records in the bundled metadata snapshot,
+including common Beechcraft Baron/BE95, Mooney, Diamond, Cessna twin, glider,
+balloon, ultralight, Van's RV, Piper, Bell and King Air codes. Photographs are
+representative family images, not pictures of the particular live airframe.
 
 You can also configure `readsb` itself to add the `t`, `r`, and `dbFlags`
 fields to `aircraft.json`. Install the same database in its standard location:
@@ -204,8 +215,15 @@ Uploading and remote retrieval have separate switches in the Coords dialog.
 When upload and the local receiver are enabled, the app starts a
 `readsb --net-only` relay from the configured Beast host/port to adsb.lol. A
 stable station UUID is stored in
-`.runtime/adsblol_station_uuid`, and relay output is appended to
-`.runtime/adsblol-feeder.log`.
+`.runtime/adsblol_station_uuid`. The quiet relay's residual stdout/stderr is
+discarded; lifecycle failures are reported through the application journal,
+preventing an unattended child-process log from growing indefinitely.
+
+An `unauthorized` fallback state means the selected endpoint returned HTTP 401
+or 403. Check `/api/diagnostics` for the provider and status. If the provider
+is `feeder`, choose **Auto** or **Public point API** unless adsb.lol has approved
+the Pi's current outbound public IP. A working upload relay is not evidence of
+re-api authorization.
 
 The Flask backend itself must have `readsb` installed even when the USB receiver
 is attached to a different computer. Disabling upload, the local receiver, or
@@ -216,7 +234,8 @@ requested geographically with `?circle=LATITUDE,LONGITUDE,RADIUS_NM`. Its
 documented access path authorizes the feeder station's public IP. A station UUID
 is not an API credential. adsb.lol advertises receiver API keys, but its public
 documentation does not specify an authentication header or parameter, so this
-application does not guess one. There is no automatic public fallback.
+application does not guess one. Provider selection is shared by continuous and
+fallback acquisition.
 
 All remote requests originate from the Flask backend. Viewing through Tailscale
 does not move those requests to the phone, although an exit node, different
@@ -321,3 +340,134 @@ military identification depends on `dbFlags` being present in `readsb` output;
 aircraft without the Military flag are treated as normal. Select the 50 NM
 range for the intended nearby military-aircraft view.
 
+## Basic display
+
+The application boots into the reversionary Basic display at `/`; `/basic`
+remains a direct alias. The **Extra** tab on its left opens the normal radar at
+`/extra`, whose curved **Basic** tab returns to the reversionary display. A normal
+tap replaces the current page rather than adding map pages to browser back
+history. The display reserves room for the tab so it cannot cover controls.
+
+Basic fills the screen with the nearest fresh aircraft's callsign, type,
+registration, reference image, departure/destination airport information,
+distance, altitude, ground speed and track. It automatically changes contact
+as aircraft move, expire or leave the configured range.
+Track is shown as one of eight compass directions (N, NE, E, SE, S, SW, W or
+NW) instead of a numeric angle.
+Missing values are shown as dashes; stale or disconnected data clears the
+contact. The configured range applies to both the normal snapshot and closest
+request. Basic has no settings dialog; return to Extra to change its location
+or range.
+
+Aircraft acquisition has three explicit policies. **Remote fallback when local
+is empty** is enabled by default and requests remote
+data only when no fresh, in-range local position passes the Normal/Military
+filters. **Remote adsb.lol aircraft** takes precedence when enabled and retains
+continuous remote collection. Offline mode blocks both remote policies, while
+uploading remains a separate setting.
+
+The fallback is owned by one collector worker shared by Basic and Extra, not by
+individual browsers. Successful requests start on a 15-second monotonic cadence
+(`ADSB_LOL_CLOSEST_POLL_SECONDS` in `config.py`), with no overlap or catch-up
+bursts. Public acquisition uses adsb.lol's closest endpoint when both Normal
+and Military are allowed. When filtering is required, or feeder re-api is
+selected, it uses the selected geographic provider and deterministically picks
+the nearest eligible result. The public v2 millisecond timestamp and feeder
+readsb timestamp are normalized before observation ages are calculated.
+
+Fresh local positions immediately cancel fallback eligibility and invalidate
+late results. Green **Live** means the displayed coordinates came from the
+local receiver; orange means their `position_source` is remote, including
+continuous collection. Expired coordinates are removed rather than relabeled.
+Pending, empty, stale, rate-limited, unauthorized, and request-error states are
+reported without claiming Live data.
+
+Basic loads system fonts and at most one local aircraft reference image: no
+Leaflet, tiles, aircraft icons, trails or animation loop. It uses the existing
+route-enrichment permission and bounded cache for airport information; when
+that permission is off it clearly says so and makes no route request. It requests one small
+`/api/aircraft/nearest` response at a time, waits two seconds after completion,
+and aborts requests after four seconds. Polling stops while hidden or leaving
+the page. An independent expiry timer clears a contact when its position or
+collector heartbeat becomes stale, even if the next request hangs.
+
+This switches the browser view only. Collection, optional feeding, configured
+remote polling, and history recording continue in the backend. The default
+kiosk URL `http://127.0.0.1:5000/` now opens Basic; no receiver changes are
+needed.
+
+## Display performance review (October 2026)
+
+Changes in this revision:
+
+- Extra cancels its animation frame loop while hidden, empty, or in constrained
+  mode. Previously an unconstrained hidden/empty map still scheduled frames.
+- Constrained mode skips motion-state calculations and clears retained motion
+  states when enabled. Static marker positions still update at receiver cadence.
+- Repeated primary text values no longer rewrite identical DOM text nodes.
+- Frontend diagnostics has a five-second timeout and a single-flight guard,
+  preventing hung minute-by-minute reports from accumulating requests.
+- Basic replaces the heavyweight document instead of hiding a running map.
+
+Existing protections verified in the code: departed marker/motion/list entries
+are removed, list rows and marker elements are reused, details have timeout and
+generation guards, trail responses are capped at 360 points, route workers have
+a bounded queue, remote collection permits one outstanding request, and SQLite
+connections close through a context manager. These are not evidence of an
+unbounded collection leak. WPE/Cog process memory, decoded images, map tiles,
+graphics buffers and zram can still consume much of a Zero 2 W's memory.
+
+Remaining findings:
+
+- `route_cache` has no retention/expiry policy. It can accumulate rows on disk
+  and preserve outdated routes for recurring callsigns. A separate change should
+  define success/negative-cache TTLs and batched pruning while preserving offline
+  cached results. Basic never reads or populates that cache.
+- Downloaded map tiles have no global disk budget; changing receiver locations
+  can leave older tile files behind. This is disk growth, not a demonstrated RAM
+  leak. Basic does not request tiles.
+- Extra still polls snapshots every second and renders a map and selected detail
+  every seven seconds. Its normal browser/graphics footprint remains significant
+  on 512 MB hardware; constrained mode should stay enabled on the Zero 2 W.
+- The available logs identify memory pressure and kiosk-specific lag, but do not
+  establish that the physical screen is responsible. No JavaScript heap profile
+  or WPE/Cog multi-hour memory trace was available for this review.
+
+Validation: `python3 -m unittest discover -s tests -v` includes endpoint tests
+and, when Node.js is installed, deterministic Basic-client and animation-loop
+tests. They cover stale/empty contacts, nearest switching, no route/asset work,
+request timeouts, non-overlap, unchanged text, and hidden/page-exit cleanup.
+Existing scheduler tests can also run with `gjs -m tests/detail_scheduler_test.js`.
+
+Before relying on this release on the Pi, compare Extra and Basic at the actual
+display resolution, tap both tabs repeatedly, verify empty/stale reception, and
+run each mode for at least an hour with similar traffic. Record process RSS,
+`free -h`, `zramctl`, and the interval rows of `vmstat 2` (the first row is a
+since-boot average). Compare available RAM and swap-in/out activity, rather than
+only swap occupancy; inactive swapped pages may remain after pressure subsides.
+Browser binaries were unavailable in the review environment, so Safari/DRM visual
+layout and actual WPE memory savings still require this hardware check.
+
+## Fallback deployment and hardware acceptance
+
+Deploy application files only; do not replace the working readsb binary,
+configuration, service overrides, or aircraft database. After updating the
+checkout, restart `adsb-radar.service`, then restart `flight-kiosk.service` if
+the browser did not reload the changed assets. Check `/api/diagnostics` for the
+acquisition policy, provider, eligible local count, selected position source,
+fallback timestamps, state, error, and request count.
+
+On the Pi, select **Remote fallback when local is empty** and turn continuous
+**Remote adsb.lol aircraft** off. Confirm fresh local positions show green.
+Temporarily stop `readsb.service` to test loss reliably—removing the antenna is
+inconclusive because strong signals and recently fresh observations can remain.
+Confirm an orange remote contact, no more than one fallback start per 15-second
+cadence, and explicit empty/stale/error/backoff states. Restart readsb and
+confirm a fresh eligible local position immediately wins and prevents new
+fallback starts. During a longer run compare touchscreen response, process RSS,
+available memory, `zramctl`, and `vmstat 2` swap activity.
+
+For rollback, stop the application service, check out the previous application
+commit, and restart `adsb-radar.service` and `flight-kiosk.service`. The added
+SQLite columns are backward-compatible and may remain. No receiver software or
+system readsb configuration is changed by this application update.

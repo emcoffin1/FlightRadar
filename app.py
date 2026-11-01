@@ -16,7 +16,7 @@ from math import (
 )
 import os
 import re
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 import time
 
 import requests
@@ -47,6 +47,7 @@ from database import (
 from local_receiver import receiver_json_location
 from route_enrichment import RouteLookupCoordinator
 from config import (
+    CLOCK_SKEW_TOLERANCE_SECONDS,
     AIRCRAFT_DETAIL_REFRESH_SECONDS,
     AIRCRAFT_REFRESH_SECONDS,
     COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS,
@@ -84,6 +85,7 @@ def lookup_aircraft_route(callsign, aircraft_hex):
 
 route_coordinator = RouteLookupCoordinator(lookup_aircraft_route)
 collector_thread = None
+collector_stop_event = Event()
 airport_data_lock = Lock()
 frontend_diagnostics_lock = Lock()
 frontend_diagnostics_state = {
@@ -94,10 +96,21 @@ frontend_diagnostics_state = {
     "trail_point_count": 0,
 }
 external_request_counts = Counter()
+APP_VERSION = os.environ.get("FLIGHTRADAR_VERSION", "unknown")
 TRANSPARENT_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
     "0000000d49444154789c6360000000020001e221bc330000000049454e44ae426082"
 )
+
+
+def _run_supervised_collector():
+    try:
+        run_collector(adsb_client, stop_event=collector_stop_event)
+    except Exception:
+        LOGGER.exception(
+            "Aircraft collector stopped unexpectedly; terminating for supervisor restart"
+        )
+        os._exit(1)
 
 
 def start_aircraft_collector():
@@ -106,14 +119,20 @@ def start_aircraft_collector():
     if collector_thread is not None and collector_thread.is_alive():
         return
 
+    collector_stop_event.clear()
     collector_thread = Thread(
-        target=run_collector,
-        args=(adsb_client,),
+        target=_run_supervised_collector,
         name="aircraft-collector",
         daemon=True,
     )
     collector_thread.start()
     LOGGER.info("Aircraft collector started")
+
+
+def stop_aircraft_collector():
+    collector_stop_event.set()
+    if collector_thread is not None and collector_thread.is_alive():
+        collector_thread.join(timeout=3)
 
 
 def ensure_airport_schema(conn):
@@ -497,7 +516,7 @@ def resolve_aircraft_route(aircraft):
         return aircraft
     aircraft = dict(aircraft)
 
-    if aircraft["route_lookup_complete"] and aircraft["departure"] is not None:
+    if aircraft.get("route_lookup_complete") and aircraft.get("departure") is not None:
         aircraft["route_status"] = (
             "unavailable"
             if aircraft["departure"] in {"NA", "N/A"}
@@ -540,6 +559,7 @@ def serialize_mode_settings(row):
 def serialize_coordinates(row):
     upload_enabled = bool(row["adsblol_upload_enabled"])
     remote_enabled = bool(row["remote_aircraft_enabled"])
+    fallback_enabled = bool(row["fallback_aircraft_enabled"])
     return {
         "lat": float(row["center_lat"]),
         "lon": float(row["center_lon"]),
@@ -548,6 +568,7 @@ def serialize_coordinates(row):
         "receiver_beast_port": int(row["receiver_beast_port"]),
         "adsblol_upload_enabled": upload_enabled,
         "remote_aircraft_enabled": remote_enabled,
+        "fallback_aircraft_enabled": fallback_enabled,
         "remote_endpoint_preference": row["remote_endpoint_preference"],
         "route_enrichment_enabled": bool(row["route_enrichment_enabled"]),
         "external_tiles_enabled": bool(row["external_tiles_enabled"]),
@@ -772,7 +793,7 @@ def map_tile(z, x, y):
     return serve_cached_tile(tile_path, cache_seconds, cache_status="MISS")
 
 
-@app.route("/")
+@app.route("/extra")
 def hello_world():
     with connect_database(rows=True) as conn:
         coordinates = conn.execute("""
@@ -941,11 +962,14 @@ def get_all_aircraft():
             ORDER BY
                 CASE WHEN range IS NULL THEN 1 ELSE 0 END,
                 range ASC,
-                callsign ASC
+                callsign ASC,
+                lower(hex) ASC
         """, (display_range, now - POSITION_FRESH_SECONDS)).fetchall()
 
         status = conn.execute("""
-            SELECT heartbeat_at FROM collector_status WHERE id = 1
+            SELECT heartbeat_at, fallback_status, source_manager_state,
+                acquisition_policy, remote_provider, fallback_provider
+            FROM collector_status WHERE id = 1
         """).fetchone()
 
     collector_fresh = bool(
@@ -960,6 +984,123 @@ def get_all_aircraft():
         str(status["heartbeat_at"]) if status and status["heartbeat_at"] else ""
     )
     response.headers["X-Response-Generated-At"] = str(now)
+    fallback_status = status["fallback_status"] if status else "disabled"
+    response.headers["X-Acquisition-State"] = fallback_status
+    response.headers["X-Source-State"] = (
+        status["source_manager_state"] if status else "LOCAL_UNHEALTHY"
+    )
+    response.headers["X-Acquisition-Provider"] = (
+        (status["remote_provider"] if status["acquisition_policy"] == "continuous_remote"
+         else status["fallback_provider"]) if status else ""
+    ) or ""
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/")
+@app.route("/basic")
+def basic_display():
+    return render_template(
+        "basic.html",
+        position_fresh_ms=int(POSITION_FRESH_SECONDS * 1000),
+        heartbeat_fresh_ms=int(COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS * 1000),
+        clock_skew_ms=int(CLOCK_SKEW_TOLERANCE_SECONDS * 1000),
+    )
+
+
+@app.route("/api/aircraft/nearest")
+def get_nearest_aircraft():
+    """Lightweight nearest-aircraft snapshot for the reversionary display."""
+    now = time.time()
+    with connect_database(rows=True) as conn:
+        status = conn.execute(
+            "SELECT * FROM collector_status WHERE id = 1"
+        ).fetchone()
+        heartbeat = status["heartbeat_at"] if status else None
+        fresh = heartbeat is not None and (
+            -CLOCK_SKEW_TOLERANCE_SECONDS <= now - float(heartbeat)
+            <= COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
+        )
+        row = None
+        if fresh:
+            row = conn.execute("""
+                SELECT hex, callsign, t, r, alt_baro, range, gs, track,
+                    position_observed_at, source, position_source, category,
+                    airline, airline_icao, departure, departure_name,
+                    destination, destination_name, route_lookup_complete
+                FROM adsb_data
+                WHERE range IS NOT NULL AND range >= 0
+                    AND range <= (SELECT search_range_nm FROM app_settings WHERE id = 1)
+                    AND lat IS NOT NULL AND lon IS NOT NULL
+                    AND position_observed_at BETWEEN ? AND ?
+                ORDER BY range ASC, lower(hex) ASC
+                LIMIT 1
+            """, (now - POSITION_FRESH_SECONDS,
+                  now + CLOCK_SKEW_TOLERANCE_SECONDS)).fetchone()
+    aircraft = None
+    live_source = None
+    if row is not None:
+        aircraft = resolve_aircraft_route(dict(row))
+        position_source = aircraft.get("position_source") or aircraft.get("source")
+        live_source = "local" if position_source == "local" else "remote"
+
+    if aircraft is not None:
+        aircraft["aircraft_image"] = aircraft_image_url(aircraft.get("t"))
+        if (
+            aircraft["aircraft_image"] is None
+            and aircraft.get("category") == "Rotorcraft/Helicopter"
+        ):
+            aircraft["aircraft_image"] = aircraft_image_url("R44")
+
+    fallback_status = status["fallback_status"] if status else "disabled"
+    source_state = (
+        status["source_manager_state"] if status else "LOCAL_UNHEALTHY"
+    )
+    if aircraft is not None:
+        display_state = live_source
+        status_message = "Live"
+    elif not fresh:
+        display_state = "stale"
+        status_message = "Collector unavailable"
+    elif fallback_status == "requesting":
+        display_state = "requesting"
+        status_message = "Requesting fallback"
+    elif fallback_status in {"rate_limited", "unauthorized", "error"}:
+        display_state = "backoff" if fallback_status == "rate_limited" else "error"
+        status_message = {
+            "rate_limited": "Fallback rate limited",
+            "unauthorized": (
+                "Feeder API unauthorized; select Public endpoint"
+                if status and status["fallback_provider"] == "feeder"
+                else "Fallback unauthorized"
+            ),
+            "error": "Fallback unavailable",
+        }[fallback_status]
+    elif fallback_status == "stale":
+        display_state = "stale"
+        status_message = "Fallback data stale"
+    elif source_state == "LOCAL_UNHEALTHY":
+        display_state = "unavailable"
+        status_message = "Receiver unavailable"
+    elif source_state == "REMOTE_UNAVAILABLE":
+        display_state = "unavailable"
+        status_message = "Remote data unavailable"
+    else:
+        display_state = "empty"
+        status_message = "No fresh aircraft"
+
+    response = jsonify({
+        "aircraft": aircraft,
+        "collector_fresh": fresh,
+        "heartbeat_at": heartbeat,
+        "generated_at": now,
+        "live_source": live_source,
+        "display_state": display_state,
+        "status_message": status_message,
+        "fallback_status": fallback_status,
+        "source_state": source_state,
+    })
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -1057,6 +1198,7 @@ def coordinate_settings():
                     adsblol_feed_enabled,
                     adsblol_upload_enabled,
                     remote_aircraft_enabled,
+                    fallback_aircraft_enabled,
                     route_enrichment_enabled,
                     external_tiles_enabled,
                     offline_mode_enabled,
@@ -1086,6 +1228,7 @@ def coordinate_settings():
                 "adsblol_feed_enabled",
                 "adsblol_upload_enabled",
                 "remote_aircraft_enabled",
+                "fallback_aircraft_enabled",
                 "route_enrichment_enabled",
                 "external_tiles_enabled",
                 "offline_mode_enabled",
@@ -1149,6 +1292,10 @@ def coordinate_settings():
                     current["remote_aircraft_enabled"]
                 ),
             )
+            fallback_enabled = data.get(
+                "fallback_aircraft_enabled",
+                bool(current["fallback_aircraft_enabled"]),
+            )
 
             conn.execute("""
                 UPDATE app_settings
@@ -1160,6 +1307,7 @@ def coordinate_settings():
                     adsblol_feed_enabled = ?,
                     adsblol_upload_enabled = ?,
                     remote_aircraft_enabled = ?,
+                    fallback_aircraft_enabled = ?,
                     route_enrichment_enabled = ?,
                     external_tiles_enabled = ?,
                     offline_mode_enabled = ?,
@@ -1178,6 +1326,7 @@ def coordinate_settings():
                 int(upload_enabled),
                 int(upload_enabled),
                 int(remote_enabled),
+                int(fallback_enabled),
                 int(data.get(
                     "route_enrichment_enabled",
                     bool(current["route_enrichment_enabled"]),
@@ -1206,6 +1355,7 @@ def coordinate_settings():
                 adsblol_feed_enabled,
                 adsblol_upload_enabled,
                 remote_aircraft_enabled,
+                fallback_aircraft_enabled,
                 route_enrichment_enabled,
                 external_tiles_enabled,
                 offline_mode_enabled,
@@ -1281,6 +1431,20 @@ def diagnostics():
                 COUNT(*) AS point_count
             FROM aircraft_positions
         """).fetchone()
+        selected = conn.execute("""
+            SELECT hex, position_source, position_observed_at
+            FROM adsb_data
+            WHERE range IS NOT NULL
+                AND range BETWEEN 0 AND (
+                    SELECT search_range_nm FROM app_settings WHERE id = 1
+                )
+                AND position_observed_at BETWEEN ? AND ?
+            ORDER BY range ASC, lower(hex) ASC
+            LIMIT 1
+        """, (
+            now - POSITION_FRESH_SECONDS,
+            now + CLOCK_SKEW_TOLERANCE_SECONDS,
+        )).fetchone()
     collector_data = dict(collector) if collector else {}
     heartbeat = collector_data.get("heartbeat_at")
     collector_data["heartbeat_age_seconds"] = (
@@ -1305,18 +1469,120 @@ def diagnostics():
     )
     with frontend_diagnostics_lock:
         frontend_data = dict(frontend_diagnostics_state)
-    return jsonify({
+    selected_data = dict(selected) if selected else None
+    if selected_data:
+        selected_data["position_age_seconds"] = max(
+            0,
+            now - float(selected_data["position_observed_at"]),
+        )
+    payload = {
+        "version": APP_VERSION,
+        "health": {
+            "collector_alive": collector_data["running"],
+            "database_ok": True,
+            "ready": collector_data["running"],
+            "source_state": collector_data.get("source_manager_state"),
+        },
         "database": dict(counts),
         "freshness": dict(freshness),
         "trail": dict(trail),
         "collector": collector_data,
+        "acquisition": {
+            "policy": collector_data.get("acquisition_policy"),
+            "provider": (
+                collector_data.get("remote_provider")
+                if collector_data.get("acquisition_policy") == "continuous_remote"
+                else collector_data.get("fallback_provider")
+            ),
+            "eligible_fresh_local_positions": collector_data.get(
+                "eligible_local_position_count", 0
+            ),
+            "selected": selected_data,
+            "fallback": {
+                "status": collector_data.get("fallback_status"),
+                "in_flight": bool(collector_data.get("fallback_in_flight")),
+                "last_attempt_at": collector_data.get("fallback_last_attempt_at"),
+                "last_success_at": collector_data.get("fallback_last_success_at"),
+                "next_request_at": collector_data.get("fallback_next_request_at"),
+                "http_status": collector_data.get("fallback_http_status"),
+                "error": collector_data.get("fallback_error"),
+                "request_count": collector_data.get("fallback_request_count", 0),
+                "valid_snapshot_count": collector_data.get(
+                    "fallback_valid_snapshot_count", 0
+                ),
+                "stale_rejection_count": collector_data.get(
+                    "fallback_stale_rejection_count", 0
+                ),
+                "consecutive_failures": collector_data.get(
+                    "fallback_consecutive_failures", 0
+                ),
+            },
+            "remote": {
+                "status": collector_data.get("remote_status"),
+                "provider": collector_data.get("remote_provider"),
+                "http_status": collector_data.get("remote_http_status"),
+                "error": collector_data.get("remote_error"),
+                "last_success_at": collector_data.get("remote_last_success_at"),
+                "next_retry_at": collector_data.get("remote_next_retry_at"),
+                "request_count": collector_data.get("remote_request_count", 0),
+                "valid_snapshot_count": collector_data.get(
+                    "remote_valid_snapshot_count", 0
+                ),
+                "stale_rejection_count": collector_data.get(
+                    "remote_stale_rejection_count", 0
+                ),
+                "consecutive_failures": collector_data.get(
+                    "remote_consecutive_failures", 0
+                ),
+            },
+        },
         "frontend": frontend_data,
         "external_requests": {
             **adsb_client.request_diagnostics(),
             **dict(external_request_counts),
         },
         "route_lookup": route_coordinator.diagnostics(),
+    }
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/health/live")
+def health_live():
+    response = jsonify({"live": True, "version": APP_VERSION})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/health/ready")
+def health_ready():
+    now = time.time()
+    try:
+        with connect_database(rows=True) as conn:
+            row = conn.execute(
+                "SELECT heartbeat_at FROM collector_status WHERE id = 1"
+            ).fetchone()
+        heartbeat = row["heartbeat_at"] if row else None
+        ready = bool(
+            heartbeat is not None
+            and -CLOCK_SKEW_TOLERANCE_SECONDS <= now - float(heartbeat)
+            <= COLLECTOR_HEARTBEAT_MAX_AGE_SECONDS
+        )
+        detail = "ready" if ready else "collector heartbeat stale"
+    except Exception as error:
+        ready = False
+        heartbeat = None
+        detail = f"database unavailable: {type(error).__name__}"
+    response = jsonify({
+        "ready": ready,
+        "detail": detail,
+        "heartbeat_at": heartbeat,
+        "version": APP_VERSION,
     })
+    response.status_code = 200 if ready else 503
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/api/diagnostics/frontend", methods=["POST"])
@@ -1362,12 +1628,10 @@ route_coordinator.set_external_enabled(
 
 
 if __name__ == "__main__":
-    # Werkzeug's debug reloader runs this module once in a supervisor and once
-    # in the server process. Start the collector only in the server process so
-    # there is never a duplicate set of ADS-B API requests.
-    # if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-    #     start_aircraft_collector()
+    # The directly supervised Flask process is the sole collector owner.
+    # Importing this module from another WSGI worker never starts a collector.
     start_aircraft_collector()
-
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
-    # app.run(debug=True)
+    try:
+        app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    finally:
+        stop_aircraft_collector()

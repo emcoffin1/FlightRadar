@@ -1,7 +1,16 @@
 """Defensive parsing for HTTP Retry-After response headers."""
 
 from email.utils import parsedate_to_datetime
+import random
 import time
+
+
+def bounded_backoff(failure_count, minimum, maximum, jitter_fraction=0.1):
+    """Return capped exponential backoff with positive random jitter."""
+    exponent = max(0, min(int(failure_count), 10))
+    base = min(float(maximum), float(minimum) * (2 ** exponent))
+    jitter = base * float(jitter_fraction) * random.random()
+    return min(float(maximum), base + jitter)
 
 
 def parse_retry_after(value, now=None):

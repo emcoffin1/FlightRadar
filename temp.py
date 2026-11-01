@@ -7,8 +7,10 @@ from time import monotonic, sleep, time
 
 import requests
 
-from adsblol import ADSB_LOL
+from adsblol import ADSB_LOL, StaleSnapshotError
+from closest_fallback import ClosestAircraftFallback
 from database import (
+    COLLECTOR_STATUS_FIELDS,
     connect_database,
     ensure_aircraft_metadata,
     ensure_aircraft_schema,
@@ -29,18 +31,75 @@ from config import (
     POSITION_RECORD_MIN_SECONDS,
     RUNTIME_DIR,
     REMOTE_RETRY_MIN_SECONDS,
+    REMOTE_RETRY_MAX_SECONDS,
     REMOTE_AUTH_RETRY_SECONDS,
     REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
-    STALE_PASS_LIMIT,
+    SOURCE_SNAPSHOT_MAX_AGE_SECONDS,
     TRAIL_MAX_PLAUSIBLE_SPEED_KT,
     TRAIL_SEGMENT_GAP_SECONDS,
 )
 from local_receiver import ADSBLolFeeder, LocalReceiver
-from freshness import is_fresh
-from retry_after import retry_after_seconds
+from freshness import finite_number, is_fresh
+from retry_after import bounded_backoff, retry_after_seconds
+from source_manager import SourceManager
 
 
 LOGGER = logging.getLogger("adsb_display.collector")
+
+
+def _position_source_priority(source):
+    """Prefer local reception when observations have identical timestamps."""
+    value = str(source or "")
+    if value == "local":
+        return 2
+    if value.startswith("remote_"):
+        return 1
+    return 0
+
+
+def _position_candidate(aircraft, *, now):
+    latitude = finite_number(aircraft.get("lat"))
+    longitude = finite_number(aircraft.get("lon"))
+    distance = finite_number(aircraft.get("range"))
+    observed_at = finite_number(aircraft.get("position_observed_at"))
+    source = str(aircraft.get("position_source") or "").strip()
+    if (
+        latitude is None or not -90 <= latitude <= 90
+        or longitude is None or not -180 <= longitude <= 180
+        or distance is None or distance < 0
+        or observed_at is None
+        or not is_fresh(observed_at, POSITION_FRESH_SECONDS, now=now)
+        or not source
+    ):
+        return None
+    return {
+        "lat": latitude,
+        "lon": longitude,
+        "range": distance,
+        "position_observed_at": observed_at,
+        "position_source": source,
+        "alt_baro": aircraft.get("alt_baro"),
+        "gs": aircraft.get("gs"),
+        "track": aircraft.get("track"),
+    }
+
+
+def _position_wins(candidate, current):
+    if candidate is None:
+        return False
+    current_time = finite_number(current.get("position_observed_at"))
+    if current_time is None:
+        return True
+    incoming_time = candidate["position_observed_at"]
+    if incoming_time != current_time:
+        return incoming_time > current_time
+    incoming_source = candidate["position_source"]
+    current_source = current.get("position_source")
+    return (
+        _position_source_priority(incoming_source), incoming_source
+    ) > (
+        _position_source_priority(current_source), str(current_source or "")
+    )
 
 
 def _distance_nm(lat1, lon1, lat2, lon2):
@@ -70,15 +129,19 @@ class RemoteAircraftPoller:
         self.status = "disabled"
         self.error = None
         self.provider = None
+        self.http_status = None
+        self.request_count = 0
+        self.valid_snapshot_count = 0
+        self.stale_rejection_count = 0
+        self.consecutive_failures = 0
         self.lock = Lock()
 
     @staticmethod
     def select_provider(preference, local_enabled, upload_enabled):
         if preference == "feeder":
             return "feeder"
-        if preference == "public":
-            return "public"
-        return "feeder" if local_enabled and upload_enabled else "public"
+        # Upload connectivity does not prove feeder re-api authorization.
+        return "public"
 
     def configure(self, *, enabled, provider, latitude, longitude, radius):
         next_config = (
@@ -94,6 +157,7 @@ class RemoteAircraftPoller:
             self.snapshot_generated_at = None
             self.next_due = 0
             self.error = None
+            self.http_status = None
             self.provider = provider if enabled else None
             self.status = "idle" if enabled else "disabled"
             if self.future is not None:
@@ -117,47 +181,90 @@ class RemoteAircraftPoller:
             generation, data = future.result()
             if generation != self.generation:
                 return
-            self.snapshot = data
+            generated_at = getattr(data, "generated_at", None)
+            if generated_at is None:
+                generated_at = max(
+                    (item.get("snapshot_generated_at") or 0 for item in data),
+                    default=0,
+                ) or None
+            if generated_at is None:
+                raise ValueError("remote snapshot has no source timestamp")
+            if now_wall - float(generated_at) > REMOTE_SNAPSHOT_MAX_AGE_SECONDS:
+                raise StaleSnapshotError("remote snapshot source timestamp is stale")
+            self.snapshot = list(data)
             self.last_success_at = now_wall
-            self.snapshot_generated_at = max(
-                (item.get("snapshot_generated_at") or 0 for item in data),
-                default=now_wall,
-            )
+            self.snapshot_generated_at = float(generated_at)
             self.next_due = now_monotonic + ADSB_LOL_POLL_SECONDS
-            self.status = "authorized" if self.provider == "feeder" else "ready"
+            self.status = "ready" if self.snapshot else "empty"
             self.error = None
+            self.http_status = 200
+            self.valid_snapshot_count += 1
+            self.consecutive_failures = 0
         except CancelledError:
             return
+        except StaleSnapshotError as error:
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.stale_rejection_count += 1
+            self.consecutive_failures += 1
+            self.next_due = now_monotonic + delay
+            self.status = "stale"
+            self.error = str(error)
+            self.http_status = 200
         except requests.exceptions.HTTPError as error:
             response = getattr(error, "response", None)
             status_code = response.status_code if response is not None else None
+            transient_delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
             if status_code in {401, 403}:
-                delay = REMOTE_AUTH_RETRY_SECONDS
+                delay = max(REMOTE_AUTH_RETRY_SECONDS, transient_delay)
                 self.status = "unauthorized"
             elif status_code == 429:
                 delay = max(
-                    REMOTE_RETRY_MIN_SECONDS,
+                    transient_delay,
                     retry_after_seconds(error, now=now_wall) or 0,
                 )
                 self.status = "rate_limited"
             else:
-                delay = REMOTE_RETRY_MIN_SECONDS
+                delay = transient_delay
                 self.status = "error"
             self.next_due = now_monotonic + delay
             self.error = str(error)
+            self.http_status = status_code
+            self.consecutive_failures += 1
             LOGGER.warning(
                 "Remote %s poll failed; retrying in %s seconds: %s",
                 self.provider, delay, error,
             )
         except (requests.exceptions.RequestException, ValueError) as error:
-            self.next_due = now_monotonic + REMOTE_RETRY_MIN_SECONDS
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.next_due = now_monotonic + delay
             self.status = "error"
             self.error = str(error)
+            self.http_status = None
+            self.consecutive_failures += 1
             LOGGER.warning("Remote %s poll failed: %s", self.provider, error)
         except Exception as error:
-            self.next_due = now_monotonic + REMOTE_RETRY_MIN_SECONDS
+            delay = bounded_backoff(
+                self.consecutive_failures,
+                REMOTE_RETRY_MIN_SECONDS,
+                REMOTE_RETRY_MAX_SECONDS,
+            )
+            self.next_due = now_monotonic + delay
             self.status = "error"
             self.error = str(error)
+            self.http_status = None
+            self.consecutive_failures += 1
             LOGGER.exception("Unexpected remote %s poll failure", self.provider)
 
     def tick(self):
@@ -171,6 +278,7 @@ class RemoteAircraftPoller:
             if enabled and self.future is None and now_monotonic >= self.next_due:
                 generation = self.generation
                 self.status = "requesting"
+                self.request_count += 1
                 self.future = self.executor.submit(
                     self._fetch,
                     generation,
@@ -185,7 +293,17 @@ class RemoteAircraftPoller:
                 or now_wall - self.last_success_at > REMOTE_SNAPSHOT_MAX_AGE_SECONDS
             ):
                 return []
-            return [dict(item) for item in self.snapshot]
+            fresh = [
+                dict(item) for item in self.snapshot
+                if is_fresh(
+                    item.get("position_observed_at"),
+                    POSITION_FRESH_SECONDS,
+                    now=now_wall,
+                )
+            ]
+            if self.snapshot and not fresh and self.future is None:
+                self.status = "stale"
+            return fresh
 
     def diagnostics(self):
         with self.lock:
@@ -197,15 +315,20 @@ class RemoteAircraftPoller:
                 "last_success_at": self.last_success_at,
                 "snapshot_generated_at": self.snapshot_generated_at,
                 "snapshot_age_seconds": (
-                    None if self.last_success_at is None
-                    else max(0, now_wall - self.last_success_at)
+                    None if self.snapshot_generated_at is None
+                    else max(0, now_wall - self.snapshot_generated_at)
                 ),
                 "next_retry_at": (
                     None if self.next_due <= now_monotonic
                     else now_wall + self.next_due - now_monotonic
                 ),
                 "error": self.error,
+                "http_status": self.http_status,
                 "in_flight": self.future is not None,
+                "request_count": self.request_count,
+                "valid_snapshot_count": self.valid_snapshot_count,
+                "stale_rejection_count": self.stale_rejection_count,
+                "consecutive_failures": self.consecutive_failures,
             }
 
     def shutdown(self):
@@ -223,13 +346,6 @@ class Database:
 
     def connect(self):
         return connect_database(self.db_path)
-
-    def execute_query_param(self, query: str, params: tuple = ()):
-        with self.connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            conn.commit()
-            return cursor.fetchall()
 
     def execute_query(self, query: str):
         with self.connect() as conn:
@@ -277,24 +393,6 @@ class Database:
                 item["dbFlags"] = row[3]
         return data
 
-    def get_modes(self):
-        settings = self.execute_query("""
-            SELECT normal_enabled, military_enabled, search_range_nm
-            FROM app_settings
-            WHERE id = 1
-        """)[0]
-
-        return bool(settings[0]), bool(settings[1]), int(settings[2])
-
-    def get_coordinates(self):
-        coordinates = self.execute_query("""
-            SELECT center_lat, center_lon
-            FROM app_settings
-            WHERE id = 1
-        """)[0]
-
-        return float(coordinates[0]), float(coordinates[1])
-
     def get_collection_settings(self):
         settings = self.execute_query("""
             SELECT
@@ -308,6 +406,7 @@ class Database:
                 receiver_beast_port,
                 adsblol_upload_enabled,
                 remote_aircraft_enabled,
+                fallback_aircraft_enabled,
                 offline_mode_enabled,
                 remote_endpoint_preference
             FROM app_settings
@@ -326,7 +425,8 @@ class Database:
             bool(settings[8]),
             bool(settings[9]),
             bool(settings[10]),
-            str(settings[11]),
+            bool(settings[11]),
+            str(settings[12]),
         )
 
     def _record_position(self, conn, aircraft_id, aircraft):
@@ -335,9 +435,6 @@ class Database:
             longitude = float(aircraft['lon'])
             recorded_at = float(aircraft['position_observed_at'])
         except (KeyError, TypeError, ValueError):
-            return
-
-        if latitude == 0 or longitude == 0:
             return
 
         previous = conn.execute("""
@@ -416,16 +513,12 @@ class Database:
     def update_collector_status(self, **values):
         if not values:
             return
-        allowed = {
-            "heartbeat_at", "local_snapshot_generated_at", "local_fetched_at",
-            "local_error", "remote_provider", "remote_last_success_at",
-            "remote_snapshot_generated_at", "remote_next_retry_at",
-            "remote_status", "remote_error", "local_message_fresh_count",
-            "local_position_fresh_count", "remote_message_fresh_count",
-            "remote_position_fresh_count", "rejected_stale_positions",
-            "upload_relay_running",
+        values = {
+            key: value for key, value in values.items()
+            if key in COLLECTOR_STATUS_FIELDS
         }
-        values = {key: value for key, value in values.items() if key in allowed}
+        if not values:
+            return
         assignments = ", ".join(f"{key} = ?" for key in values)
         with self.connect() as conn:
             conn.execute(
@@ -443,18 +536,41 @@ class Database:
         recorded_at = time()
 
         with self.connect() as conn:
-            current_aircraft = {
-                row[1]: row[0]
-                for row in conn.execute(
-                    "SELECT id, hex FROM adsb_data"
-                ).fetchall()
+            aircraft_hexes = {
+                str(item.get("hex") or "").strip().lower()
+                for item in data
+                if isinstance(item, dict) and item.get("hex")
             }
+            current_aircraft = {}
+            aircraft_hexes = tuple(aircraft_hexes)
+            for offset in range(0, len(aircraft_hexes), 500):
+                batch = aircraft_hexes[offset:offset + 500]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = conn.execute(f"""
+                    SELECT id, hex, position_observed_at, position_source
+                    FROM adsb_data
+                    WHERE hex IN ({placeholders})
+                """, batch).fetchall()
+                current_aircraft.update({
+                    row[1]: {
+                        "id": row[0],
+                        "position_observed_at": row[2],
+                        "position_source": row[3],
+                    }
+                    for row in rows
+                })
             current_aircraft_ids = set()
 
             for ac in data:
                 try:
-                    aircraft_id = current_aircraft.get(ac['hex'])
+                    current = current_aircraft.get(ac['hex'])
+                    aircraft_id = current["id"] if current is not None else None
                     decoded_flags = ', '.join(ac.get('flag', []))
+                    candidate = _position_candidate(ac, now=recorded_at)
+                    position_update = (
+                        candidate is not None
+                        and (current is None or _position_wins(candidate, current))
+                    )
 
                     if aircraft_id is not None:
                         query = """
@@ -488,33 +604,30 @@ class Database:
                             ELSE route_lookup_complete
                         END,
                         callsign = ?, t = ?, r = ?,
-                        lat = CASE
-                            WHEN ? IS NOT NULL AND (
-                                position_observed_at IS NULL
-                                OR ? >= position_observed_at
-                            ) THEN ? ELSE lat END,
-                        lon = CASE
-                            WHEN ? IS NOT NULL AND (
-                                position_observed_at IS NULL
-                                OR ? >= position_observed_at
-                            ) THEN ? ELSE lon END,
-                        range = ?, alt_baro = ?, gs = ?, track = ?,
+                        lat = CASE WHEN ? THEN ? ELSE lat END,
+                        lon = CASE WHEN ? THEN ? ELSE lon END,
+                        range = CASE WHEN ? THEN ? ELSE range END,
+                        alt_baro = CASE WHEN ? THEN ? ELSE alt_baro END,
+                        gs = CASE WHEN ? THEN ? ELSE gs END,
+                        track = CASE WHEN ? THEN ? ELSE track END,
                         type = ?, category = ?, flag = ?, missed_updates = 0,
                         message_observed_at = MAX(
                             COALESCE(message_observed_at, 0),
                             COALESCE(?, 0)
                         ),
-                        position_observed_at = MAX(
-                            COALESCE(position_observed_at, 0),
+                        position_observed_at = CASE
+                            WHEN ? THEN ? ELSE position_observed_at END,
+                        snapshot_generated_at = MAX(
+                            COALESCE(snapshot_generated_at, 0),
                             COALESCE(?, 0)
                         ),
-                        snapshot_generated_at = ?, source_fetched_at = ?,
+                        source_fetched_at = MAX(
+                            COALESCE(source_fetched_at, 0),
+                            COALESCE(?, 0)
+                        ),
                         collector_updated_at = ?, source = ?,
                         position_source = CASE
-                            WHEN ? IS NOT NULL AND (
-                                position_observed_at IS NULL
-                                OR ? >= position_observed_at
-                            ) THEN ? ELSE position_source END
+                            WHEN ? THEN ? ELSE position_source END
                     WHERE id = ?;
                         """
                         items = [
@@ -528,28 +641,30 @@ class Database:
                             ac['callsign'],
                             ac['t'],
                             ac['r'],
-                            ac.get('position_observed_at'),
-                            ac.get('position_observed_at'),
-                            ac['lat'],
-                            ac.get('position_observed_at'),
-                            ac.get('position_observed_at'),
-                            ac['lon'],
-                            ac['range'],
-                            ac['alt_baro'],
-                            ac['gs'],
-                            ac['track'],
+                            int(position_update),
+                            candidate["lat"] if candidate else None,
+                            int(position_update),
+                            candidate["lon"] if candidate else None,
+                            int(position_update),
+                            candidate["range"] if candidate else None,
+                            int(position_update),
+                            candidate["alt_baro"] if candidate else None,
+                            int(position_update),
+                            candidate["gs"] if candidate else None,
+                            int(position_update),
+                            candidate["track"] if candidate else None,
                             ac['type'],
                             ac['category'],
                             decoded_flags,
                             ac.get('message_observed_at'),
-                            ac.get('position_observed_at'),
+                            int(position_update),
+                            candidate["position_observed_at"] if candidate else None,
                             ac.get('snapshot_generated_at'),
                             ac.get('source_fetched_at'),
                             recorded_at,
                             ac.get('source'),
-                            ac.get('position_observed_at'),
-                            ac.get('position_observed_at'),
-                            ac.get('position_source'),
+                            int(position_update),
+                            candidate["position_source"] if candidate else None,
                             aircraft_id,
                         ]
                         conn.execute(query, items)
@@ -573,12 +688,12 @@ class Database:
                             ac['callsign'],
                             ac['t'],
                             ac['r'],
-                            ac['lat'],
-                            ac['lon'],
-                            ac['range'],
-                            ac['alt_baro'],
-                            ac['track'],
-                            ac['gs'],
+                            candidate["lat"] if candidate else None,
+                            candidate["lon"] if candidate else None,
+                            candidate["range"] if candidate else None,
+                            candidate["alt_baro"] if candidate else None,
+                            candidate["track"] if candidate else None,
+                            candidate["gs"] if candidate else None,
                             ac['type'],
                             ac['category'],
                             decoded_flags,
@@ -589,23 +704,51 @@ class Database:
                             ac['destination'],
                             ac['destination_name'],
                             ac.get('message_observed_at'),
-                            ac.get('position_observed_at'),
+                            candidate["position_observed_at"] if candidate else None,
                             ac.get('snapshot_generated_at'),
                             ac.get('source_fetched_at'),
                             recorded_at,
                             ac.get('source'),
-                            ac.get('position_source'),
+                            candidate["position_source"] if candidate else None,
                         ))
                         aircraft_id = cursor.lastrowid
-                        current_aircraft[ac['hex']] = aircraft_id
+                        current_aircraft[ac['hex']] = {
+                            "id": aircraft_id,
+                            "position_observed_at": (
+                                candidate["position_observed_at"]
+                                if candidate else None
+                            ),
+                            "position_source": (
+                                candidate["position_source"]
+                                if candidate else None
+                            ),
+                        }
+                        current = current_aircraft[ac['hex']]
 
                     current_aircraft_ids.add(aircraft_id)
-                    if ac.get("position_observed_at") is None:
+                    if position_update:
+                        current["position_observed_at"] = candidate[
+                            "position_observed_at"
+                        ]
+                        current["position_source"] = candidate["position_source"]
+                    elif candidate is None:
                         stale_sources = [
                             value for value in str(ac.get("source") or "").split("+")
                             if value
                         ]
-                        if stale_sources:
+                        snapshot_time = finite_number(
+                            ac.get("snapshot_generated_at")
+                            or ac.get("source_fetched_at")
+                        )
+                        current_position_time = finite_number(
+                            current.get("position_observed_at")
+                        )
+                        if (
+                            current.get("position_source") in stale_sources
+                            and snapshot_time is not None
+                            and current_position_time is not None
+                            and snapshot_time >= current_position_time
+                        ):
                             placeholders = ", ".join("?" for _ in stale_sources)
                             conn.execute(f"""
                                 UPDATE adsb_data
@@ -617,7 +760,14 @@ class Database:
                                 WHERE id = ?
                                     AND position_source IN ({placeholders})
                             """, (aircraft_id, *stale_sources))
-                    self._record_position(conn, aircraft_id, ac)
+                            current["position_observed_at"] = None
+                            current["position_source"] = None
+                    if position_update:
+                        self._record_position(
+                            conn,
+                            aircraft_id,
+                            {**ac, **candidate},
+                        )
                 except Exception as error:
                     raise Exception(
                         f"ERROR: {error} - \nData:\n {ac}"
@@ -673,10 +823,21 @@ def merge_aircraft(remote_aircraft, local_aircraft):
                 combined[key] = existing.get(key, local.get(key))
         candidates = [
             item for item in (existing, local)
-            if item.get("lat") is not None and item.get("lon") is not None
+            if finite_number(item.get("lat")) is not None
+            and -90 <= finite_number(item.get("lat")) <= 90
+            and finite_number(item.get("lon")) is not None
+            and -180 <= finite_number(item.get("lon")) <= 180
+            and finite_number(item.get("range")) is not None
+            and finite_number(item.get("range")) >= 0
+            and finite_number(item.get("position_observed_at")) is not None
+            and str(item.get("position_source") or "").strip()
         ]
         candidates.sort(
-            key=lambda item: float(item.get("position_observed_at") or 0),
+            key=lambda item: (
+                float(item.get("position_observed_at") or 0),
+                _position_source_priority(item.get("position_source")),
+                str(item.get("position_source") or ""),
+            ),
             reverse=True,
         )
         if candidates:
@@ -720,6 +881,7 @@ def run_collector(
     monotonic_clock=None,
     wall_clock=None,
     sleeper=None,
+    stop_event=None,
 ):
     """Collect local and optional remote snapshots until stopped.
 
@@ -737,6 +899,11 @@ def run_collector(
         monotonic_clock=monotonic_clock,
         wall_clock=wall_clock,
     )
+    fallback_poller = ClosestAircraftFallback(
+        adsb,
+        monotonic_clock=monotonic_clock,
+        wall_clock=wall_clock,
+    )
     atexit.register(feeder.stop)
     atexit.register(remote_poller.shutdown)
     db = Database()
@@ -744,11 +911,18 @@ def run_collector(
     local_aircraft = []
     local_failures = 0
     iterations = 0
+    source_manager = SourceManager()
 
-    while True:
+    while stop_event is None or not stop_event.is_set():
         collection_settings = db.get_collection_settings()
         if len(collection_settings) == 11:
             collection_settings = (*collection_settings, "auto")
+        if len(collection_settings) == 12:
+            collection_settings = (
+                *collection_settings[:10],
+                False,
+                *collection_settings[10:],
+            )
         (
             normal_enabled,
             military_enabled,
@@ -760,6 +934,7 @@ def run_collector(
             receiver_beast_port,
             adsblol_upload_enabled,
             remote_aircraft_enabled,
+            fallback_aircraft_enabled,
             offline_mode_enabled,
             remote_endpoint_preference,
         ) = collection_settings
@@ -786,13 +961,12 @@ def run_collector(
                     max_range=MAX_COLLECTION_RANGE,
                     source="local",
                     fetched_at=local_payload["source_fetched_at"],
+                    snapshot_max_age=SOURCE_SNAPSHOT_MAX_AGE_SECONDS,
                 )
                 local_failures = 0
                 local_snapshot_succeeded = True
             except (OSError, ValueError, requests.exceptions.RequestException) as error:
                 local_failures += 1
-                if local_failures >= STALE_PASS_LIMIT:
-                    local_aircraft = []
                 if local_failures == 1 or local_failures % 30 == 0:
                     LOGGER.warning(
                         "Local readsb poll failed (%s consecutive): %s",
@@ -811,14 +985,73 @@ def run_collector(
             local_enabled,
             adsblol_upload_enabled,
         )
+        continuous_remote = remote_aircraft_enabled and not offline_mode_enabled
+        fallback_enabled = (
+            fallback_aircraft_enabled
+            and not remote_aircraft_enabled
+            and not offline_mode_enabled
+        )
+        acquisition_policy = (
+            "continuous_remote" if continuous_remote
+            else "local_with_fallback" if fallback_enabled
+            else "local_only"
+        )
+
+        eligible_local = [
+            item for item in filter_modes(
+                local_aircraft,
+                normal_enabled,
+                military_enabled,
+            )
+            if item.get("position_source") == "local"
+            and item.get("range") is not None
+            and 0 <= float(item["range"]) <= display_range
+            and is_fresh(
+                item.get("position_observed_at"),
+                POSITION_FRESH_SECONDS,
+                now=wall_clock(),
+            )
+        ]
+        source_decision = source_manager.decide(
+            local_enabled=local_enabled,
+            local_snapshot_valid=local_snapshot_succeeded,
+            eligible_local_count=len(eligible_local),
+            fallback_enabled=fallback_enabled,
+            continuous_remote=continuous_remote,
+            offline=offline_mode_enabled,
+        )
+        fallback_poller.configure(
+            enabled=fallback_enabled,
+            provider=provider,
+            latitude=center_lat,
+            longitude=center_lon,
+            radius=display_range,
+            normal_enabled=normal_enabled,
+            military_enabled=military_enabled,
+        )
+        if not fallback_enabled:
+            fallback_poller.tick(active=False)
+        fallback_busy = fallback_poller.diagnostics()["in_flight"]
+
         remote_poller.configure(
-            enabled=remote_aircraft_enabled and not offline_mode_enabled,
+            enabled=continuous_remote and not fallback_busy,
             provider=provider,
             latitude=center_lat,
             longitude=center_lon,
             radius=MAX_COLLECTION_RANGE,
         )
-        remote_aircraft = remote_poller.tick()
+        remote_snapshot = remote_poller.tick()
+        remote_aircraft = remote_snapshot if continuous_remote else []
+        remote_busy = remote_poller.diagnostics()["in_flight"]
+        fallback_aircraft = fallback_poller.tick(
+            active=source_decision["poll_fallback"] and not remote_busy
+        )
+        if fallback_enabled:
+            remote_aircraft = (
+                fallback_aircraft
+                if source_decision["display_remote"]
+                else []
+            )
 
         data = filter_modes(
             merge_aircraft(remote_aircraft, local_aircraft),
@@ -828,7 +1061,11 @@ def run_collector(
         try:
             db.update_ac(
                 data,
-                authoritative_sources={"local"} if local_snapshot_succeeded else None,
+                authoritative_sources=(
+                    {"local", "remote_fallback_public", "remote_fallback_feeder"}
+                    if local_snapshot_succeeded
+                    else {"remote_fallback_public", "remote_fallback_feeder"}
+                ),
             )
         except TypeError as error:
             # Compatibility for small test/dry-run database adapters.
@@ -837,6 +1074,15 @@ def run_collector(
             db.update_ac(data)
         now_wall = wall_clock()
         remote_diagnostics = remote_poller.diagnostics()
+        fallback_diagnostics = fallback_poller.diagnostics()
+        active_remote_diagnostics = (
+            remote_diagnostics if continuous_remote else fallback_diagnostics
+        )
+        source_manager.observe_remote(
+            active_remote_diagnostics["status"],
+            bool(remote_aircraft),
+        )
+        source_diagnostics = source_manager.diagnostics()
         status_values = dict(
             heartbeat_at=now_wall,
             local_snapshot_generated_at=local_snapshot_generated_at,
@@ -848,6 +1094,37 @@ def run_collector(
             remote_next_retry_at=remote_diagnostics["next_retry_at"],
             remote_status=remote_diagnostics["status"],
             remote_error=remote_diagnostics["error"],
+            remote_http_status=remote_diagnostics["http_status"],
+            remote_request_count=remote_diagnostics["request_count"],
+            remote_valid_snapshot_count=remote_diagnostics[
+                "valid_snapshot_count"
+            ],
+            remote_stale_rejection_count=remote_diagnostics[
+                "stale_rejection_count"
+            ],
+            remote_consecutive_failures=remote_diagnostics[
+                "consecutive_failures"
+            ],
+            acquisition_policy=acquisition_policy,
+            eligible_local_position_count=len(eligible_local),
+            fallback_provider=fallback_diagnostics["provider"],
+            fallback_status=fallback_diagnostics["status"],
+            fallback_in_flight=int(fallback_diagnostics["in_flight"]),
+            fallback_last_attempt_at=fallback_diagnostics["last_attempt_at"],
+            fallback_last_success_at=fallback_diagnostics["last_success_at"],
+            fallback_next_request_at=fallback_diagnostics["next_request_at"],
+            fallback_http_status=fallback_diagnostics["http_status"],
+            fallback_error=fallback_diagnostics["error"],
+            fallback_request_count=fallback_diagnostics["request_count"],
+            fallback_valid_snapshot_count=fallback_diagnostics[
+                "valid_snapshot_count"
+            ],
+            fallback_stale_rejection_count=fallback_diagnostics[
+                "stale_rejection_count"
+            ],
+            fallback_consecutive_failures=fallback_diagnostics[
+                "consecutive_failures"
+            ],
             local_message_fresh_count=sum(
                 is_fresh(item.get("message_observed_at"), MESSAGE_FRESH_SECONDS, now=now_wall)
                 for item in local_aircraft
@@ -871,6 +1148,11 @@ def run_collector(
             upload_relay_running=int(
                 feeder.process is not None and feeder.process.poll() is None
             ),
+            source_manager_state=source_diagnostics["state"],
+            local_snapshot_valid=int(local_snapshot_succeeded),
+            local_empty_streak=source_diagnostics["empty_streak"],
+            local_failure_streak=source_diagnostics["failure_streak"],
+            local_recovery_streak=source_diagnostics["recovery_streak"],
         )
         if hasattr(db, "update_collector_status"):
             db.update_collector_status(**status_values)
@@ -882,9 +1164,12 @@ def run_collector(
         )
         iterations += 1
         if max_iterations is not None and iterations >= max_iterations:
-            remote_poller.shutdown()
-            return
+            break
         sleeper(LOCAL_RECEIVER_POLL_SECONDS)
+
+    feeder.stop()
+    remote_poller.shutdown()
+    fallback_poller.shutdown()
 
 
 if __name__ == "__main__":

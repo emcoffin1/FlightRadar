@@ -11,9 +11,16 @@ from config import (
     DEFAULT_SEARCH_RANGE,
     MESSAGE_FRESH_SECONDS,
     POSITION_FRESH_SECONDS,
+    REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
     REMOTE_REQUEST_TIMEOUT_SECONDS,
 )
-from freshness import finite_number, is_fresh, observation_time, valid_absolute_time
+from freshness import (
+    finite_number,
+    is_fresh,
+    observation_time,
+    provider_snapshot_seconds,
+    valid_absolute_time,
+)
 
 
 EARTH_RADIUS_NM = 3440.065
@@ -57,8 +64,47 @@ CATEGORY_NAMES = {
 }
 
 
+def normalized_text(value, default=None):
+    """Normalize optional provider text without assuming a string type."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
+def validated_coordinates(latitude, longitude):
+    latitude = finite_number(latitude)
+    longitude = finite_number(longitude)
+    if latitude is None or not -90 <= latitude <= 90:
+        raise ValueError("latitude must be a finite number from -90 to 90")
+    if longitude is None or not -180 <= longitude <= 180:
+        raise ValueError("longitude must be a finite number from -180 to 180")
+    return latitude, longitude
+
+
+def validated_radius(value):
+    radius = finite_number(value)
+    if radius is None or radius <= 0:
+        raise ValueError("range must be a positive finite number")
+    return radius
+
+
 class ExternalLookupDisabled(Exception):
     """Raised when route-network permission is revoked between providers."""
+
+
+class StaleSnapshotError(ValueError):
+    """Raised when a provider returns a valid schema with obsolete data."""
+
+
+class AircraftSnapshot(list):
+    """Normalized aircraft plus the source timestamp for empty snapshots."""
+
+    def __init__(self, aircraft, *, generated_at, fetched_at, source):
+        super().__init__(aircraft)
+        self.generated_at = generated_at
+        self.fetched_at = fetched_at
+        self.source = source
 
 
 def decode_flags(db_flags: int) -> list:
@@ -119,62 +165,45 @@ class ADSB_LOL:
             return dict(self._request_counts)
 
 
-    def GET_all(self, range=25, military=True, normal=True):
-        """
-        Return aircraft inside the point radius according to the selected feeds.
-
-        The point endpoint already contains military aircraft, so one request is
-        enough. The dbFlags military bit is used to make the Normal and Military
-        toggles mutually useful without returning duplicate aircraft.
-        """
-        if not normal and not military:
-            return []
-
-        aircraft = self.GET_point(range=range)
-
-        if normal and military:
-            return aircraft
-
-        if military:
-            return [
-                ac for ac in aircraft
-                if "Military" in ac.get('flag', [])
-            ]
-
-        return [
-            ac for ac in aircraft
-            if "Military" not in ac.get('flag', [])
-        ]
-
-
     def _range_to_point(
         self,
         data: dict,
-        single_point: bool = False,
         max_range: float | None = None,
+        *,
+        reference_lat=None,
+        reference_lon=None,
+        snapshot_max_age=None,
     ):
-        """
-        Calculates the distance of each aircraft from the given point (self.LAT, self.LON) and adds it to the aircraft data.
-        """
-        if single_point:
-            items = data
-        else:
-            items = data['ac']
+        """Add receiver-relative distance to a normalized aircraft list."""
+        if not isinstance(data, dict):
+            raise ValueError("aircraft data must be an object")
+        items = data.get('ac')
+        if not isinstance(items, list):
+            raise ValueError("aircraft snapshot does not contain an aircraft list")
             
 
+        center_lat, center_lon = validated_coordinates(
+            self.LAT if reference_lat is None else reference_lat,
+            self.LON if reference_lon is None else reference_lon,
+        )
+        range_limit = None if max_range is None else validated_radius(max_range)
+
         for ac in items:
-            if 'lat' in ac and 'lon' in ac:
-                lat = ac['lat']
-                lon = ac['lon']
-            else: 
-                lat = lon = 0
+            if not isinstance(ac, dict):
+                continue
+            lat = finite_number(ac.get('lat'))
+            lon = finite_number(ac.get('lon'))
 
-            if lat != 0 and lon != 0:
+            if (
+                lat is not None and -90 <= lat <= 90
+                and lon is not None and -180 <= lon <= 180
+            ):
                 # Calculation
-                dlat = radians(self.LAT - lat)
-                dlon = radians(self.LON - lon)
+                dlat = radians(center_lat - lat)
+                dlon = radians(center_lon - lon)
 
-                a = sin(dlat / 2)**2 + cos(radians(lat)) * cos(radians(self.LAT)) * sin(dlon / 2)**2
+                a = sin(dlat / 2)**2 + cos(radians(lat)) * cos(radians(center_lat)) * sin(dlon / 2)**2
+                a = min(1, max(0, a))
                 c = 2 * atan2(sqrt(a), sqrt(1 - a))
                 distance = EARTH_RADIUS_NM * c
             else:
@@ -183,19 +212,13 @@ class ADSB_LOL:
             # Add to dictionary for individual item
             ac['range'] = distance
 
-        if not single_point:
-            aircraft = data['ac']
-
-            if max_range is not None:
-                aircraft = [
-                    ac for ac in aircraft
-                    if ac['range'] is None or ac['range'] <= max_range
-                ]
-
-            return {'ac': aircraft}
-            
-        else:
-            return distance
+        aircraft = data['ac']
+        if range_limit is not None:
+            aircraft = [
+                ac for ac in aircraft
+                if ac['range'] is None or ac['range'] <= range_limit
+            ]
+        return {'ac': aircraft}
 
 
     def _add_dbFlags(self, data):
@@ -224,19 +247,30 @@ class ADSB_LOL:
         *,
         source=None,
         fetched_at=None,
+        reference_lat=None,
+        reference_lon=None,
+        snapshot_max_age=None,
     ):
-        """
-        Filters the data so that all lists contain the same value
-        GREAT FILTER
-        """
-        fetched_at = time.time() if fetched_at is None else float(fetched_at)
-        source = source or data.get("source") or "local"
+        """Validate and normalize readsb-compatible aircraft snapshots."""
+        if not isinstance(data, dict):
+            raise ValueError("aircraft snapshot is not a JSON object")
+        fetched_at = finite_number(time.time() if fetched_at is None else fetched_at)
+        if fetched_at is None or fetched_at <= 0:
+            raise ValueError("aircraft snapshot has an invalid fetch timestamp")
+        source = normalized_text(source or data.get("source"), "local")
         generated_at = valid_absolute_time(
             data.get("now") or data.get("_snapshot_generated_at"),
             now=fetched_at,
         )
         if generated_at is None:
             raise ValueError("aircraft snapshot has an invalid timestamp")
+        if (
+            snapshot_max_age is not None
+            and fetched_at - generated_at > float(snapshot_max_age)
+        ):
+            raise StaleSnapshotError(
+                f"aircraft snapshot is {fetched_at - generated_at:.1f}s old"
+            )
 
         raw_aircraft = data.get("ac")
         if not isinstance(raw_aircraft, list):
@@ -284,7 +318,6 @@ class ADSB_LOL:
                     latitude is None or longitude is None
                     or not -90 <= latitude <= 90
                     or not -180 <= longitude <= 180
-                    or latitude == 0 or longitude == 0
                 ):
                     ac.pop("lat", None)
                     ac.pop("lon", None)
@@ -295,9 +328,10 @@ class ADSB_LOL:
             normalized_input.append(ac)
 
         data_ranged = self._range_to_point(
-            single_point=False,
             data={"ac": normalized_input},
             max_range=max_range,
+            reference_lat=reference_lat,
+            reference_lon=reference_lon,
         )
         acs = data_ranged['ac']
 
@@ -308,22 +342,20 @@ class ADSB_LOL:
         
             plane = {}
 
-            aircraft_hex = str(ac.get("hex") or "").strip().lower()
+            aircraft_hex = normalized_text(ac.get("hex"), "").lower()
             if not aircraft_hex:
                 continue
             plane['hex'] = aircraft_hex
 
-            if 'flight' in ac:
-                callsign = ac['flight'].strip()
-            elif 'callsign' in ac:
-                callsign = ac['callsign'].strip()
-            else:
-                callsign = "NA"
+            callsign = normalized_text(
+                ac.get('flight', ac.get('callsign')),
+                "NA",
+            )
             plane['callsign'] = callsign
 
-            plane['t'] = str(ac.get('t') or "NA").strip() or "NA"
+            plane['t'] = normalized_text(ac.get('t'), "NA")
 
-            plane['r'] = str(ac.get('r') or "NA").strip() or "NA"
+            plane['r'] = normalized_text(ac.get('r'), "NA")
 
             if 'lat' in ac and 'lon' in ac:
                 lat = ac['lat']
@@ -335,10 +367,16 @@ class ADSB_LOL:
             plane['lat'] = lat
             plane['lon'] = lon
 
-            # plane['range'] = self._range_to_point(single_point=True, data=[ac])
             plane['range'] = ac['range']
 
-            plane['alt_baro'] = ac['alt_baro'] if 'alt_baro' in ac else "NA"
+            altitude = ac.get('alt_baro')
+            if normalized_text(altitude, "").lower() == "ground":
+                altitude = "ground"
+            else:
+                altitude = finite_number(altitude)
+                if altitude is None:
+                    altitude = "NA"
+            plane['alt_baro'] = altitude
 
             if 'track' in ac:
                 track = ac['track']
@@ -349,20 +387,22 @@ class ADSB_LOL:
             elif 'mag_heading' in ac:
                 track = ac['mag_heading']
             else:
-                track = "NA"
-            plane['track'] = track
+                track = None
+            track = finite_number(track)
+            plane['track'] = track % 360 if track is not None else "NA"
 
             if 'gs' in ac:
                 gs = ac['gs']
             elif 'ias' in ac:
                 gs = ac['ias']
             else:
-                gs = "NA"
-            plane['gs'] = gs 
+                gs = None
+            gs = finite_number(gs)
+            plane['gs'] = gs if gs is not None and gs >= 0 else "NA"
 
             # readsb uses ``t`` for the ICAO aircraft type.  The public API
             # sometimes also supplies a descriptive ``type`` field.
-            plane['type'] = ac.get('type', "NA")
+            plane['type'] = normalized_text(ac.get('type'), "NA")
 
             plane['category'] = decode_category(ac['category']) if 'category' in ac else "NA"
 
@@ -386,7 +426,12 @@ class ADSB_LOL:
 
             new_data.append(plane)
                 
-        return new_data
+        return AircraftSnapshot(
+            new_data,
+            generated_at=generated_at,
+            fetched_at=fetched_at,
+            source=source,
+        )
 
 
     def GET_flight_info(self, callsign, hex, permission_check=None):
@@ -484,16 +529,22 @@ class ADSB_LOL:
         
     def GET_point(self, range, provider="public", *, lat=None, lon=None):
         """Fetch one geographic snapshot from the selected adsb.lol API."""
-        latitude = self.LAT if lat is None else float(lat)
-        longitude = self.LON if lon is None else float(lon)
+        latitude, longitude = validated_coordinates(
+            self.LAT if lat is None else lat,
+            self.LON if lon is None else lon,
+        )
+        radius = validated_radius(range)
         if provider == "feeder":
             url = (
                 "https://re-api.adsb.lol/"
-                f"?circle={latitude},{longitude},{range}"
+                f"?circle={latitude},{longitude},{radius:g}"
             )
             provider_name = "adsblol_re_api"
         elif provider == "public":
-            url = f"https://api.adsb.lol/v2/point/{latitude}/{longitude}/{range}"
+            url = (
+                "https://api.adsb.lol/v2/point/"
+                f"{latitude}/{longitude}/{radius:g}"
+            )
             provider_name = "adsblol_point"
         else:
             raise ValueError("remote provider must be public or feeder")
@@ -513,32 +564,57 @@ class ADSB_LOL:
             raise ValueError("adsb.lol response does not contain an aircraft list")
         normalized = dict(payload)
         normalized["ac"] = aircraft
+        normalized["now"] = provider_snapshot_seconds(
+            payload.get("now"),
+            provider,
+        )
         data = self._filter_format(
             data=normalized,
-            max_range=range,
+            max_range=radius,
             source=f"remote_{provider}",
             fetched_at=fetched_at,
+            reference_lat=latitude,
+            reference_lon=longitude,
+            snapshot_max_age=REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
         )
         
         return data
 
 
-    def GET_closest(self, range):
-        """
-        Returns closest aircraft to given point, set to 50mi range by default, cannot be changed.
-        """
+    def GET_closest(self, range, *, lat=None, lon=None):
+        """Return the closest fresh aircraft within ``range`` nautical miles."""
+        latitude, longitude = validated_coordinates(
+            self.LAT if lat is None else lat,
+            self.LON if lon is None else lon,
+        )
+        radius = validated_radius(range)
+        url = (
+            "https://api.adsb.lol/v2/closest/"
+            f"{latitude}/{longitude}/{radius:g}"
+        )
 
-        url = f"https://api.adsb.lol/v2/closest/{self.LAT}/{self.LON}/{range}"
-        
-        response = self._external_get("adsblol_closest", url, timeout=15)
+        response = self._external_get(
+            "adsblol_closest",
+            url,
+            timeout=REMOTE_REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
-        response = response.json()
-        data = self._filter_format(data=response)
-        
-        return data
-
-if __name__ == "__main__":
-    adsb_lol = ADSB_LOL()
-    data = adsb_lol.GET_all(range=30)
-    for i in data:
-        print(f"{i['callsign']} - {i['hex']} ({i['flag']}): {i['departure']}")
+        fetched_at = time.time()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("adsb.lol response is not a JSON object")
+        if not isinstance(payload.get("ac"), list):
+            raise ValueError("adsb.lol response does not contain an aircraft list")
+        normalized = dict(payload)
+        normalized["now"] = provider_snapshot_seconds(
+            payload.get("now"),
+            "closest",
+        )
+        return self._filter_format(
+            data=normalized,
+            source="remote_closest",
+            fetched_at=fetched_at,
+            reference_lat=latitude,
+            reference_lon=longitude,
+            snapshot_max_age=REMOTE_SNAPSHOT_MAX_AGE_SECONDS,
+        )

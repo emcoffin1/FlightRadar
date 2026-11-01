@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flight Radar · Basic</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='basic.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='view-tabs.css') }}">
+</head>
+<body>
+    <a class="view-tab view-tab--left" href="{{ url_for('hello_world') }}" aria-label="Switch to Extra display"><span>Extra</span></a>
+    <main class="basic-display">
+        <header><span>Nearest aircraft</span><span id="status" role="status">Connecting</span></header>
+        <section class="contact" aria-label="Aircraft identity">
+            <div class="identity">
+                <h1 id="callsign">—</h1>
+                <p><span id="type">—</span><span id="registration">—</span></p>
+            </div>
+            <img id="aircraft-image" class="aircraft-image" hidden alt="">
+        </section>
+        <section class="airport-route" aria-label="Airport locations">
+            <div>
+                <span class="route-label">From</span>
+                <strong id="departure">—</strong>
+                <span id="departure-name">—</span>
+            </div>
+            <span class="route-arrow" aria-hidden="true">→</span>
+            <div>
+                <span class="route-label">To</span>
+                <strong id="destination">—</strong>
+                <span id="destination-name">—</span>
+            </div>
+        </section>
+        <dl class="instruments">
+            <div><dt>Distance</dt><dd><span id="distance">—</span> <small>nm</small></dd></div>
+            <div><dt>Altitude</dt><dd><span id="altitude">—</span> <small>ft</small></dd></div>
+            <div><dt>Ground speed</dt><dd><span id="speed">—</span> <small>kt</small></dd></div>
+            <div><dt>Track</dt><dd><span id="track">—</span></dd></div>
+        </dl>
+        <footer><span id="hex">—</span><span id="source">Waiting for fresh positions</span></footer>
+    </main>
+    <script>
+        window.basicConfig = {{ {
+            'url': url_for('get_nearest_aircraft'),
+            'positionFreshMs': position_fresh_ms,
+            'heartbeatFreshMs': heartbeat_fresh_ms,
+            'clockSkewMs': clock_skew_ms
+        } | tojson }};
+    </script>
+    <script src="{{ url_for('static', filename='basic.js') }}"></script>
+    <script src="{{ url_for('static', filename='view-tabs.js') }}"></script>
+</body>
+</html>
